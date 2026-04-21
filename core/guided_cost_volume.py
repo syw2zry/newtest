@@ -58,7 +58,7 @@ class EdgeGuidance(nn.Module):
         )
 
         # 非线性软阈值映射
-        scale, offset = 5.0, 0.2
+        scale, offset = 5.0, 0.17
         edge_mask = torch.sigmoid(scale * (downsampled - offset))
         edge_mask = edge_mask ** 2.0
         
@@ -69,7 +69,7 @@ class EdgeGuidance(nn.Module):
 # 2. 频域解耦模块
 # ==========================================
 class FrequencyDecoupler(nn.Module):
-    def __init__(self, kernel_size: int = 5):
+    def __init__(self, kernel_size: int = 3):
         super(FrequencyDecoupler, self).__init__()
         assert kernel_size % 2 == 1, f"kernel_size must be odd, got {kernel_size}"
         self.kernel_size = kernel_size

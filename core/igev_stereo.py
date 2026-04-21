@@ -236,8 +236,8 @@ class IGEVStereo(nn.Module):
                 f_low_r, f_high_r = self.frequency_decoupler(features_right[0])
                 
                 # C. 边缘引导的特征截断 (左右图均使用左图 Mask，保证一致性)
-                f_high_l_modulated = f_high_l * mask_left
-                f_high_r_modulated = f_high_r * mask_left
+                f_high_l_modulated = f_high_l * (1.0 + mask_left)
+                f_high_r_modulated = f_high_r * (1.0 + mask_left)
                 
                 # D. 特征重组
                 features_left[0] = f_low_l + f_high_l_modulated

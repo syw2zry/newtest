@@ -11,15 +11,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ==========================================
-# 1. 边缘结构先验引导模块
-# ==========================================
+
 class EdgeGuidance(nn.Module):
-    def __init__(self, downsample_factor=4, blur_kernel_size=5, sigma=1.5):
+    """
+    边缘结构先验引导模块
+    
+    Args:
+        downsample_factor (int): 下采样因子，默认4
+        blur_kernel_size (int): 高斯模糊核大小，默认5
+        sigma (float): 高斯核标准差，默认1.5
+        scale (float): Sigmoid缩放系数，默认10.0
+        offset (float): Sigmoid偏移量，默认0.15
+    """
+    def __init__(self, downsample_factor=4, blur_kernel_size=5, sigma=1.5, scale=10.0, offset=0.15):
         super(EdgeGuidance, self).__init__()
         self.downsample_factor = downsample_factor
         self.blur_kernel_size = blur_kernel_size
         self.sigma = sigma
+        self.scale = scale
+        self.offset = offset
 
         rgb_to_gray_weights = torch.tensor([0.2989, 0.5870, 0.1140]).view(1, 3, 1, 1)
         self.register_buffer('rgb_to_gray_weights', rgb_to_gray_weights)
@@ -57,18 +67,19 @@ class EdgeGuidance(nn.Module):
             stride=self.downsample_factor
         )
 
-        # 非线性软阈值映射
-        scale, offset = 5.0, 0.17
-        edge_mask = torch.sigmoid(scale * (downsampled - offset))
+        edge_mask = torch.sigmoid(self.scale * (downsampled - self.offset))
         edge_mask = edge_mask ** 2.0
         
         return edge_mask
 
 
-# ==========================================
-# 2. 频域解耦模块
-# ==========================================
 class FrequencyDecoupler(nn.Module):
+    """
+    频域解耦模块：将特征图分解为低频和高频分量
+    
+    Args:
+        kernel_size (int): 平均池化核大小，默认为3
+    """
     def __init__(self, kernel_size: int = 3):
         super(FrequencyDecoupler, self).__init__()
         assert kernel_size % 2 == 1, f"kernel_size must be odd, got {kernel_size}"
@@ -87,13 +98,16 @@ class FrequencyDecoupler(nn.Module):
         return f_low, f_high
 
 
-# ==========================================
-# 3. 自适应尺度代价卷 (原 GBC)
-# ==========================================
 class AdaptiveScaleVolume(nn.Module):
     """
     Adaptive Scale Cost Volume (取代原来的 GBC_Volume)
     利用语义边缘 Mask，动态预测感受野尺度权重，自适应融合多尺度 3D 代价卷。
+    
+    Args:
+        in_channels (int): 输入特征通道数
+        out_channels (int): 输出代价卷通道数
+        max_disp (int): 最大视差范围
+        num_groups (int): 分组数，默认8
     """
     def __init__(self, in_channels: int, out_channels: int, max_disp: int, num_groups: int = 8):
         super(AdaptiveScaleVolume, self).__init__()
@@ -107,7 +121,6 @@ class AdaptiveScaleVolume(nn.Module):
             
         self.adaptive_temp = nn.Parameter(torch.tensor([1.0], dtype=torch.float32))
 
-        # 尺度预测器：输入通道 + 1 (接收 edge_mask)
         self.scale_predictor = nn.Sequential(
             nn.Conv2d(in_channels + 1, 32, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(32),
@@ -115,7 +128,6 @@ class AdaptiveScaleVolume(nn.Module):
             nn.Conv2d(32, 3, kernel_size=1, bias=True)
         )
         
-        # 多尺度 3D 聚合 (小/中/大感受野)
         self.agg_small = nn.Conv3d(num_groups, num_groups, kernel_size=3, stride=1, padding=1, dilation=1, bias=False)
         self.agg_medium = nn.Conv3d(num_groups, num_groups, kernel_size=3, stride=1, padding=2, dilation=2, bias=False)
         self.agg_large = nn.Conv3d(num_groups, num_groups, kernel_size=3, stride=1, padding=4, dilation=4, bias=False)
@@ -147,7 +159,6 @@ class AdaptiveScaleVolume(nn.Module):
     def forward(self, feat_l: torch.Tensor, feat_r: torch.Tensor, edge_mask: torch.Tensor) -> torch.Tensor:
         base_volume = self._build_volume(feat_l, feat_r)
 
-        # 结合语义先验进行尺度预测
         predictor_input = torch.cat([feat_l, edge_mask], dim=1)
         scale_weights = self.scale_predictor(predictor_input)
         
@@ -158,7 +169,6 @@ class AdaptiveScaleVolume(nn.Module):
         w_m_exp = scale_weights[:, 1:2, :, :].unsqueeze(2)  
         w_l_exp = scale_weights[:, 2:3, :, :].unsqueeze(2)  
         
-        # 极致显存优化的原地操作
         vol_s = self.agg_small(base_volume)
         fused_volume = vol_s.mul_(w_s_exp)
         

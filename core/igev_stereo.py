@@ -7,9 +7,6 @@ from core.geometry import Combined_Geo_Encoding_Volume
 from core.submodule import *
 import time
 
-# 推送测试
-
-# [Ours] 导入整合后的引导式代价卷模块
 from core.guided_cost_volume import EdgeGuidance, FrequencyDecoupler, AdaptiveScaleVolume
 from core.submodule import build_gwc_volume
 
@@ -114,12 +111,17 @@ class IGEVStereo(nn.Module):
         self.context_zqr_convs = nn.ModuleList([nn.Conv2d(context_dims[i], args.hidden_dims[i]*3, 3, padding=3//2) for i in range(self.args.n_gru_layers)])
         self.feature = Feature()
         
-        # --- [Ours Stage 1 & 2] 初始化边缘引导与频域解耦 ---
-        self.edge_guidance = EdgeGuidance(downsample_factor=4, blur_kernel_size=9, sigma=3.0)
+        edge_scale = getattr(args, 'edge_scale', 10.0)
+        edge_offset = getattr(args, 'edge_offset', 0.15)
+        self.edge_guidance = EdgeGuidance(
+            downsample_factor=4, 
+            blur_kernel_size=9, 
+            sigma=3.0,
+            scale=edge_scale,
+            offset=edge_offset
+        )
         self.frequency_decoupler = FrequencyDecoupler(kernel_size=5)
 
-        # --- [Ours Stage 3] 初始化自适应尺度代价卷 (原GBC) ---
-        # 解释：match_left 通道数为 96，输出通道数设为 8 以适配原版 hourglass 结构
         self.guided_volume = AdaptiveScaleVolume(
             in_channels=96,           
             out_channels=8,           
@@ -172,35 +174,31 @@ class IGEVStereo(nn.Module):
     def _check_and_print_modules(self):
         print("\n" + "="*60)
         
-        # 获取当前的架构模式，默认为 'ours'
         arch_mode = getattr(self.args, 'model_arch', 'ours')
         
         if arch_mode == 'baseline':
-            print("🚀 [Baseline] 模型结构初始化完毕! 当前为原版 IGEV++ 模式。")
+            print("[Baseline] 模型结构初始化完毕! 当前为原版 IGEV++ 模式。")
             print("-" * 60)
-            print("  ℹ️  [数据流向] 自定义模块 (边缘先验/频域解耦/动态代价卷) 已被完全旁路。")
-            print("  ✅ [代价聚合] 使用原版 Group-Wise Correlation (GWC) 代价卷。")
+            print("  [数据流向] 自定义模块 (边缘先验/频域解耦/动态代价卷) 已被完全旁路。")
+            print("  [代价聚合] 使用原版 Group-Wise Correlation (GWC) 代价卷。")
         else:
-            print("🚀 [Ours] 模型结构初始化完毕! 核心模块挂载状态检测:")
+            print("[Ours] 模型结构初始化完毕! 核心模块挂载状态检测:")
             print("-" * 60)
             
-            # 检测 1: 边缘引导模块
             if hasattr(self, 'edge_guidance'):
-                print("  ✅ [Stage 1] Edge Guidance (边缘结构先验)  : 已启用")
+                print("  [Stage 1] Edge Guidance (边缘结构先验)  : 已启用")
             else:
-                print("  ❌ [Stage 1] Edge Guidance (边缘结构先验)  : 未启用/被注释")
+                print("  [Stage 1] Edge Guidance (边缘结构先验)  : 未启用/被注释")
                 
-            # 检测 2: 频域解耦模块
             if hasattr(self, 'frequency_decoupler'):
-                print("  ✅ [Stage 2] Frequency Decoupler (频域提纯) : 已启用")
+                print("  [Stage 2] Frequency Decoupler (频域提纯) : 已启用")
             else:
-                print("  ❌ [Stage 2] Frequency Decoupler (频域提纯) : 未启用/被注释")
+                print("  [Stage 2] Frequency Decoupler (频域提纯) : 未启用/被注释")
                 
-            # 检测 3: 引导式自适应代价卷
             if hasattr(self, 'guided_volume'):
-                print("  ✅ [Stage 3] Guided Cost Volume(自适应代价卷): 已启用")
+                print("  [Stage 3] Guided Cost Volume(自适应代价卷): 已启用")
             else:
-                print("  ❌ [Stage 3] Guided Cost Volume(自适应代价卷): 未启用 (警告: 将使用原版代价卷)")
+                print("  [Stage 3] Guided Cost Volume(自适应代价卷): 未启用 (警告: 将使用原版代价卷)")
                 
         print("="*60 + "\n")
 
@@ -227,44 +225,32 @@ class IGEVStereo(nn.Module):
             features_left = self.feature(image1)
             features_right = self.feature(image2)
             
-            # ===================== [架构拨片：Ours vs Baseline] =====================
+            stem_2x = self.stem_2(image1)
+            stem_4x = self.stem_4(stem_2x)
+            stem_2y = self.stem_2(image2)
+            stem_4y = self.stem_4(stem_2y)
+            
             if getattr(self.args, 'model_arch', 'ours') == 'ours':
-                # 【Ours 路径】
-                # A. 提取左图边缘先验 (Mask)
                 mask_left = self.edge_guidance(image1)
                 
-                # B. 频域解耦
                 f_low_l, f_high_l = self.frequency_decoupler(features_left[0])
                 f_low_r, f_high_r = self.frequency_decoupler(features_right[0])
                 
-                # C. 边缘引导的特征截断 (左右图均使用左图 Mask，保证一致性)
                 f_high_l_modulated = f_high_l * (1.0 + mask_left)
                 f_high_r_modulated = f_high_r * (1.0 + mask_left)
                 
-                # D. 特征重组
                 features_left[0] = f_low_l + f_high_l_modulated
                 features_right[0] = f_low_r + f_high_r_modulated
 
-                # E. 经过原版 Stem 与卷积层
-                stem_2x = self.stem_2(image1)
-                stem_4x = self.stem_4(stem_2x)
-                stem_2y = self.stem_2(image2)
-                stem_4y = self.stem_4(stem_2y)
                 features_left[0] = torch.cat((features_left[0], stem_4x), 1)
                 features_right[0] = torch.cat((features_right[0], stem_4y), 1)
 
                 match_left = self.desc(self.conv(features_left[0]))
                 match_right = self.desc(self.conv(features_right[0])) 
                 
-                # F. 使用我们的自适应多尺度代价卷 (传入 Mask 作为尺度引导)
                 all_disp_volume = self.guided_volume(match_left, match_right, mask_left)
 
             else:
-                # 【Baseline 路径：完全还原原项目逻辑】
-                stem_2x = self.stem_2(image1)
-                stem_4x = self.stem_4(stem_2x)
-                stem_2y = self.stem_2(image2)
-                stem_4y = self.stem_4(stem_2y)
                 features_left[0] = torch.cat((features_left[0], stem_4x), 1)
                 features_right[0] = torch.cat((features_right[0], stem_4y), 1)
 
@@ -272,7 +258,6 @@ class IGEVStereo(nn.Module):
                 match_right = self.desc(self.conv(features_right[0])) 
                 
                 all_disp_volume = build_gwc_volume(match_left, match_right, self.args.max_disp//4, 8)
-            # =========================================================================
 
 
             disp_volume0 = all_disp_volume[:,:,:self.args.s_disp_range]
@@ -309,7 +294,6 @@ class IGEVStereo(nn.Module):
         disp = agg_disp0
         iter_preds = []
 
-        # GRUs iterations to update disparity
         for itr in range(iters):
             disp = disp.detach()
             geo_feat0, geo_feat1, geo_feat2, init_corr = geo_fn(disp, coords)
@@ -320,7 +304,6 @@ class IGEVStereo(nn.Module):
             if test_mode and itr < iters-1:
                 continue
 
-            # upsample predictions
             disp_up = self.upsample_disp(disp, mask_feat_4, stem_2x)
             iter_preds.append(disp_up)
 

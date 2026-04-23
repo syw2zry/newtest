@@ -38,12 +38,12 @@
     &quot;assignee&quot;: &quot;syw2zry&quot;
   }
 }</component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/syw2zry/newtest.git",
-    "accountId": "0ae6de4e-e5d9-409e-9e92-c22a6cb59776"
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/syw2zry/newtest.git&quot;,
+    &quot;accountId&quot;: &quot;0ae6de4e-e5d9-409e-9e92-c22a6cb59776&quot;
   }
-}]]></component>
+}</component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 4
 }</component>

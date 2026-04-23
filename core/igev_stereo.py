@@ -231,23 +231,35 @@ class IGEVStereo(nn.Module):
             stem_4y = self.stem_4(stem_2y)
             
             if getattr(self.args, 'model_arch', 'ours') == 'ours':
+                # 1. 提取左右两张图各自的 Mask（接通右眼视觉的物理神经）
                 mask_left = self.edge_guidance(image1)
+                mask_right = self.edge_guidance(image2)
                 
+                # 2. 频域解耦
                 f_low_l, f_high_l = self.frequency_decoupler(features_left[0])
                 f_low_r, f_high_r = self.frequency_decoupler(features_right[0])
                 
-                f_high_l_modulated = f_high_l * (1.0 + mask_left)
-                f_high_r_modulated = f_high_r * (1.0 + mask_left)
+                # 3. 边缘调制（严格使用 .mul_ 原地操作榨干显存，且各自使用各自的 Mask）
+                f_high_l_modulated = f_high_l.mul_(1.0 + mask_left)
+                f_high_r_modulated = f_high_r.mul_(1.0 + mask_right)
                 
-                features_left[0] = f_low_l + f_high_l_modulated
-                features_right[0] = f_low_r + f_high_r_modulated
+                # 4. 特征重组（严格使用 .add_ 原地操作）
+                features_left[0] = f_low_l.add_(f_high_l_modulated)
+                features_right[0] = f_low_r.add_(f_high_r_modulated)
 
+                # 5. 防御性尺寸对齐（防止奇数分辨率裁剪导致 cat 崩溃）
+                if features_left[0].shape[2:] != stem_4x.shape[2:]:
+                    stem_4x = F.interpolate(stem_4x, size=features_left[0].shape[2:], mode='bilinear', align_corners=False)
+                    stem_4y = F.interpolate(stem_4y, size=features_right[0].shape[2:], mode='bilinear', align_corners=False)
+
+                # 6. 特征拼接与输出
                 features_left[0] = torch.cat((features_left[0], stem_4x), 1)
                 features_right[0] = torch.cat((features_right[0], stem_4y), 1)
 
                 match_left = self.desc(self.conv(features_left[0]))
                 match_right = self.desc(self.conv(features_right[0])) 
                 
+                # 7. 代价卷构建（使用左图 Mask 作为动态聚合权重的先验是可以的，因为这是主视角代价卷）
                 all_disp_volume = self.guided_volume(match_left, match_right, mask_left)
 
             else:

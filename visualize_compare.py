@@ -98,7 +98,13 @@ def load_model(args, ckpt_path, arch):
         else:
             new_checkpoint[k] = v
 
-    model.load_state_dict(new_checkpoint, strict=True)
+    # 关闭严格匹配模式，允许缺失新模块的参数
+    missing_keys, unexpected_keys = model.load_state_dict(new_checkpoint, strict=False)
+    
+    # 打印提示，避免未来忘记
+    if len(missing_keys) > 0:
+        print(f"\n[Warning] 加载权重时缺失了 {len(missing_keys)} 个 Keys。如果您当前加载的是 Baseline 权重，此为正常现象，不影响推理。")
+    
     model.cuda()
     model.eval()
     return model

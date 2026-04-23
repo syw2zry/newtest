@@ -138,6 +138,7 @@ def train(args):
         args.num_steps = 20000
         validation_frequency = 200
     else:
+        args.num_steps = 100000
         validation_frequency = 1000
 
     model = nn.DataParallel(IGEVStereo(args))

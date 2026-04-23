@@ -4,10 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="cacaade9-a09a-4573-8925-52aad3d7b2af" name="更改" comment="修改">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/train_stereo.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_stereo.py" afterDir="false" />
-    </list>
+    <list default="true" id="cacaade9-a09a-4573-8925-52aad3d7b2af" name="更改" comment="修改" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -129,7 +126,7 @@
       <workItem from="1776752812937" duration="16000" />
       <workItem from="1776752835024" duration="644000" />
       <workItem from="1776938727900" duration="642000" />
-      <workItem from="1776946928845" duration="891000" />
+      <workItem from="1776946928845" duration="1515000" />
     </task>
     <task id="LOCAL-00001" summary="new2.0">
       <option name="closed" value="true" />
@@ -179,7 +176,15 @@
       <option name="project" value="LOCAL" />
       <updated>1776946953401</updated>
     </task>
-    <option name="localTasksCounter" value="7" />
+    <task id="LOCAL-00007" summary="修改">
+      <option name="closed" value="true" />
+      <created>1776948516837</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1776948516837</updated>
+    </task>
+    <option name="localTasksCounter" value="8" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

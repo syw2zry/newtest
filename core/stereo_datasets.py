@@ -280,8 +280,8 @@ class WHUStereo(StereoDataset):
         img1 = np.clip(img1, 0, 255).astype(np.uint8)
         img2 = np.clip(img2, 0, 255).astype(np.uint8)
 
-        # 4. 解析视差图 (延续原项目除以 256.0 的尺度)
-        disp = np.array(disp).astype(np.float32) / 256.0
+        # 4. 解析视差图
+        disp = np.array(disp).astype(np.float32)
 
         # 5. 生成有效掩膜与 flow 张量
         valid = (disp > 0) & (disp < 10000)

@@ -33,7 +33,7 @@ def sequence_loss(args, agg_preds, iter_preds, disp_gt, valid, loss_gamma=0.9):
     n_predictions = len(iter_preds)
     assert n_predictions >= 1
     
-    max_disp = 192
+    max_disp = args.max_disp
 
     disp_loss = 0.0
     mag = torch.sum(disp_gt ** 2, dim=1).sqrt()
@@ -201,8 +201,10 @@ def train(args):
             if total_steps % validation_frequency == validation_frequency - 1:
                 logging.info(
                     f"\n{'=' * 60}\n>>> STATUS: [Step {total_steps + 1}] STOP Training -> START Validation\n{'=' * 60}")
-                save_path = Path(args.logdir + '/%d_%s.pth' % (total_steps + 1, args.name))
-                logging.info(f"Saving file {save_path.absolute()}")
+                
+                safe_name = args.name.replace('/', '_')
+                save_path = Path(args.logdir + '/%d_%s.pth' % (total_steps + 1, safe_name))
+                logging.info(f"Saving intermediate model to {save_path.absolute()}")
                 torch.save(model.state_dict(), save_path)
 
                 results = {}
@@ -219,22 +221,37 @@ def train(args):
 
                 logger.write_dict(results)
 
+# ==========================================================
+                # --- 1. 获取当前评估的核心指标 (严格对齐字典键名) ---
+                # ==========================================================
                 current_metric = None
                 if 'dfc-epe' in results:
                     current_metric = results['dfc-epe']
-                # 修复：对齐真实的字典键名（双重 whu-）
-                elif 'whu-zero-shot-whu-edge-epe' in results:
+                # 针对 EdgeFreq-Net，强制盯紧跨城泛化的边缘指标！
+                elif 'whu-zero-shot-whu-edge-epe' in results: 
                     current_metric = results['whu-zero-shot-whu-edge-epe']
                 elif 'whu-in-domain-whu-epe' in results:
                     current_metric = results['whu-in-domain-whu-epe']
+                elif 'whu-epe' in results: # 兼容单路验证的情况
+                    current_metric = results['whu-epe']
 
+                # ==========================================================
+                # --- 2. 最佳模型判定与安全保存 ---
+                # ==========================================================
                 if current_metric is not None:
                     logging.info(f"Current Metric: {current_metric:.4f} (Best: {best_epe:.4f})")
                     if current_metric < best_epe:
                         best_epe = current_metric
-                        best_save_path = Path(args.logdir + '/%s_best.pth' % args.name)
+                        
+                        # 确保已经定义了 safe_name (上一段代码中应该已有)
+                        safe_name = args.name.replace('/', '_') 
+                        
+                        # 安全保存最优模型
+                        best_save_path = Path(args.logdir + '/%s_best.pth' % safe_name)
                         logging.info(f"New best model! Saving to {best_save_path.absolute()}")
                         torch.save(model.state_dict(), best_save_path)
+                else:
+                    logging.warning("Warning: current_metric is None! Check if your dictionary keys match.")
 
                 model.train()
                 model.module.freeze_bn()
@@ -309,9 +326,11 @@ if __name__ == '__main__':
     parser.add_argument('--spatial_scale', type=float, nargs='+', default=[-0.4, 0.8],
                         help='re-scale the images randomly')
     parser.add_argument('--noyjitter', action='store_true', help='don\'t simulate imperfect rectification')
-    args = parser.parse_args()
+    
     parser.add_argument('--model_arch', default='ours', choices=['baseline', 'ours'], help='Choose model architecture')
 
+    args = parser.parse_args()
+    
     torch.manual_seed(666)
     np.random.seed(666)
 

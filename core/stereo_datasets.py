@@ -218,60 +218,33 @@ class WHUStereo(StereoDataset):
         self._read_data()
 
     def _read_data(self):
-        if self.split in ['train', 'validation']:
-            sub_folder = 'train'
-        else:
-            sub_folder = 'test'
+        split_folder = self.split
+        if split_folder == 'validation':
+            split_folder = 'val'
 
-        root_dir = os.path.join(self.root, sub_folder)
+        left_dir = os.path.join(self.root, split_folder, 'left')
+        right_dir = os.path.join(self.root, split_folder, 'right')
+        disp_dir = os.path.join(self.root, split_folder, 'disp')
 
-        if not os.path.exists(root_dir):
-            logging.warning(f"Warning: {root_dir} not found, trying root directly...")
-            root_dir = self.root
+        if not os.path.exists(left_dir):
+            logging.warning(f"Warning: {left_dir} not found, cannot load WHU dataset for split '{self.split}'")
+            logging.info(f"WHUStereo ({self.split}) loaded 0 samples.")
+            return
 
         self.image_list = []
         self.disparity_list = []
 
-        all_left_files = []
-        all_right_files = []
-        all_disp_files = []
+        left_files = sorted(glob(os.path.join(left_dir, '*_left_*.tiff')))
 
-        scenes = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
+        for left_path in left_files:
+            right_path = left_path.replace('_left_', '_right_').replace(left_dir, right_dir)
+            disp_path = left_path.replace('_left_', '_disparity_').replace(left_dir, disp_dir)
 
-        for scene in scenes:
-            left_dir = os.path.join(root_dir, scene, 'Left')
-            right_dir = os.path.join(root_dir, scene, 'Right')
-            disp_dir = os.path.join(root_dir, scene, 'Disparity')
+            if os.path.exists(left_path) and os.path.exists(right_path) and os.path.exists(disp_path):
+                self.image_list.append([left_path, right_path])
+                self.disparity_list.append(disp_path)
 
-            if not os.path.exists(left_dir): continue
-
-            imgs = sorted([img for img in os.listdir(left_dir) if img.endswith('.png')])
-
-            for img in imgs:
-                l_path = os.path.join(left_dir, img)
-                r_path = os.path.join(right_dir, img)
-                d_path = os.path.join(disp_dir, img)
-
-                if os.path.exists(l_path) and os.path.exists(r_path) and os.path.exists(d_path):
-                    all_left_files.append(l_path)
-                    all_right_files.append(r_path)
-                    all_disp_files.append(d_path)
-
-        if self.split in ['train', 'validation']:
-            total_len = len(all_left_files)
-            split_idx = int(total_len * 0.9)
-
-            if self.split == 'train':
-                self.image_list = [list(x) for x in zip(all_left_files[:split_idx], all_right_files[:split_idx])]
-                self.disparity_list = all_disp_files[:split_idx]
-            elif self.split == 'validation':
-                self.image_list = [list(x) for x in zip(all_left_files[split_idx:], all_right_files[split_idx:])]
-                self.disparity_list = all_disp_files[split_idx:]
-        else:
-            self.image_list = [list(x) for x in zip(all_left_files, all_right_files)]
-            self.disparity_list = all_disp_files
-
-        logging.info(f"WHUStereo ({self.split}) loaded {len(self.image_list)} samples.")
+        logging.info(f"WHUStereo ({self.split}) loaded {len(self.image_list)} samples from physical split folder.")
 
     def __getitem__(self, index):
         index = index % len(self.image_list)

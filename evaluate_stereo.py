@@ -76,7 +76,7 @@ def validate_dfc2019(model, iters=32, mixed_prec=False, args=None, split='val'):
             outliers_1px.append((epe > 1.0).float().mean().item())
             outliers_3px.append((epe > 3.0).float().mean().item())
             
-        del image1, image2, flow_gt, valid_gt, flow_pr, padder, epe, val
+        del image1, image2, flow_gt, valid_gt, flow_pr, epe, val
         torch.cuda.empty_cache()
 
     mean_epe = np.mean(epe_list)
@@ -89,7 +89,8 @@ def validate_dfc2019(model, iters=32, mixed_prec=False, args=None, split='val'):
 
 @torch.no_grad()
 def validate_whu(model, iters=32, mixed_prec=False, split='validation'):
-    """ Peform validation/testing using the WHU-Stereo dataset """
+    """ Perform validation/testing using the WHU-Stereo dataset with physical boundary prior metrics """
+    import torch.nn.functional as F
     model.eval()
     aug_params = {}
 
@@ -98,11 +99,20 @@ def validate_whu(model, iters=32, mixed_prec=False, split='validation'):
     val_loader = data.DataLoader(val_dataset, batch_size=1,
                                  pin_memory=True, shuffle=False, num_workers=4)
 
-    print(f"Validating on WHU-Stereo ({len(val_dataset)} samples)...")
+    print(f"Validating on WHU-Stereo ({len(val_dataset)} samples) with physical boundary metrics...")
 
-    epe_list = []
+    global_epe_list = []
+    edge_epe_list = []
+    smooth_epe_list = []
     outliers_1px_list = []
     outliers_3px_list = []
+
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+    sobel_x = sobel_x.cuda()
+    sobel_y = sobel_y.cuda()
+
+    edge_threshold = 30.0
 
     for val_id, (_, image1, image2, flow_gt, valid_gt) in enumerate(tqdm(val_loader)):
         image1 = image1.cuda()
@@ -110,30 +120,59 @@ def validate_whu(model, iters=32, mixed_prec=False, split='validation'):
         flow_gt = flow_gt.cuda()
         valid_gt = valid_gt.cuda()
 
+        valid_gt = valid_gt.unsqueeze(1)
+
         flow_pr = run_inference(model, image1, image2, iters=iters, mixed_prec=mixed_prec)
 
         assert flow_pr.shape == flow_gt.shape, f"Shape mismatch: {flow_pr.shape} vs {flow_gt.shape}"
 
-        epe = torch.sum((flow_pr - flow_gt).abs() * valid_gt) / (valid_gt.sum() + 1e-6)
+        gray = 0.299 * image1[:, 0:1, :, :] + 0.587 * image1[:, 1:2, :, :] + 0.114 * image1[:, 2:3, :, :]
+
+        grad_x = F.conv2d(gray, sobel_x, padding=1)
+        grad_y = F.conv2d(gray, sobel_y, padding=1)
+        gradient_magnitude = torch.sqrt(grad_x ** 2 + grad_y ** 2)
+
+        edge_mask = (gradient_magnitude > edge_threshold)
+        smooth_mask = ~edge_mask
 
         diff = (flow_pr - flow_gt).abs()
+
+        global_epe = (diff * valid_gt).sum() / (valid_gt.sum() + 1e-6)
+
+        edge_valid = (valid_gt > 0.5) & edge_mask
+        edge_epe = (diff * edge_valid.float()).sum() / (edge_valid.sum() + 1e-6)
+
+        smooth_valid = (valid_gt > 0.5) & smooth_mask
+        smooth_epe = (diff * smooth_valid.float()).sum() / (smooth_valid.sum() + 1e-6)
+
         outlier_mask_1px = (diff > 1.0) & (valid_gt > 0.5)
         outlier_1px = outlier_mask_1px.float().sum() / (valid_gt.sum() + 1e-6)
 
         outlier_mask_3px = (diff > 3.0) & (valid_gt > 0.5)
         outlier_3px = outlier_mask_3px.float().sum() / (valid_gt.sum() + 1e-6)
 
-        epe_list.append(epe.item())
+        global_epe_list.append(global_epe.item())
+        edge_epe_list.append(edge_epe.item())
+        smooth_epe_list.append(smooth_epe.item())
         outliers_1px_list.append(outlier_1px.item())
         outliers_3px_list.append(outlier_3px.item())
 
-    epe_mean = np.mean(epe_list)
+    global_epe_mean = np.mean(global_epe_list)
+    edge_epe_mean = np.mean(edge_epe_list)
+    smooth_epe_mean = np.mean(smooth_epe_list)
     outliers_1px_mean = np.mean(outliers_1px_list)
     outliers_3px_mean = np.mean(outliers_3px_list)
 
-    print(f"Validation WHU: EPE: {epe_mean:.4f}, 1px: {outliers_1px_mean:.4f}, 3px: {outliers_3px_mean:.4f}")
+    print(f"Validation WHU: Global-EPE: {global_epe_mean:.4f}, Edge-EPE: {edge_epe_mean:.4f}, "
+          f"Smooth-EPE: {smooth_epe_mean:.4f}, 1px: {outliers_1px_mean:.4f}, 3px: {outliers_3px_mean:.4f}")
 
-    return {'whu-epe': epe_mean, 'whu-1px': outliers_1px_mean, 'whu-3px': outliers_3px_mean}
+    return {
+        'whu-epe': global_epe_mean,
+        'whu-edge-epe': edge_epe_mean,
+        'whu-smooth-epe': smooth_epe_mean,
+        'whu-1px': outliers_1px_mean,
+        'whu-3px': outliers_3px_mean
+    }
 
 
 if __name__ == '__main__':

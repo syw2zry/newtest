@@ -1,0 +1,114 @@
+digraph NetworkArchitecture {
+	nodesep=0.6 rankdir=TB ranksep=0.8 splines=ortho
+	subgraph cluster_phase1 {
+		color=gray fontname="Helvetica-Bold" label="Phase 1: Input & Base Feature Extraction" style=dashed
+		L [label="Left Image" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		R [label="Right Image" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		S2L [label="Stem_2x (L)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		S2R [label="Stem_2x (R)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		S4L [label="Stem_4x (L)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		S4R [label="Stem_4x (R)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		FExt [label="Feature Extractor
+(MobileNetV2)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		FL [label="F_left (1/4)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		FR [label="F_right (1/4)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+	}
+	L -> S2L
+	R -> S2R
+	S2L -> S4L
+	S2R -> S4R
+	L -> FExt
+	R -> FExt
+	FExt -> FL
+	FExt -> FR
+	subgraph cluster_phase2 {
+		color="#d0a9f5" fontname="Helvetica-Bold" label="Phase 2: Structural & Frequency Guidance (Ours)" style=dashed
+		EGL [label="Edge Guidance (L)
+[Sobel + Sq Sigmoid]" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		EGR [label="Edge Guidance (R)
+[Sobel + Sq Sigmoid]" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		ML [label=Mask_L color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		MR [label=Mask_R color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FDL [label="Freq Decoupler (L)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FDR [label="Freq Decoupler (R)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FL_low [label="F_low (L)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FL_high [label="F_high (L)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FR_low [label="F_low (R)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FR_high [label="F_high (R)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FL_mod [label="F_high_modulated (L)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		FR_mod [label="F_high_modulated (R)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		ReL [label="F_refined (L)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		ReR [label="F_refined (R)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		MatchL [label=match_left color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		MatchR [label=match_right color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+	}
+	L -> EGL
+	R -> EGR
+	EGL -> ML
+	EGR -> MR
+	FL -> FDL
+	FR -> FDR
+	FDL -> FL_low
+	FDL -> FL_high
+	FDR -> FR_low
+	FDR -> FR_high
+	FL_high -> FL_mod [label="mul_ (x 1+Mask_L)" fontcolor="#555555" fontname=Helvetica fontsize=10]
+	ML -> FL_mod [style=dotted]
+	FR_high -> FR_mod [label="mul_ (x 1+Mask_R)" fontcolor="#555555" fontname=Helvetica fontsize=10]
+	MR -> FR_mod [style=dotted]
+	FL_low -> ReL [label=add_ fontcolor="#555555" fontname=Helvetica fontsize=10]
+	FL_mod -> ReL
+	FR_low -> ReR [label=add_ fontcolor="#555555" fontname=Helvetica fontsize=10]
+	FR_mod -> ReR
+	ReL -> MatchL [label=cat fontcolor="#555555" fontname=Helvetica fontsize=10]
+	S4L -> MatchL
+	ReR -> MatchR [label=cat fontcolor="#555555" fontname=Helvetica fontsize=10]
+	S4R -> MatchR
+	subgraph cluster_phase3 {
+		color="#d0a9f5" fontname="Helvetica-Bold" label="Phase 3: Adaptive Scale Cost Volume (Ours)" style=dashed
+		GWC [label="Group-Wise Correlation" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		BaseVol [label="Base Cost Volume" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		SP [label="Scale Predictor" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		W [label="Weights: W_s, W_m, W_l" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		AggS [label="3D Agg (Dilation=1)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		AggM [label="3D Agg (Dilation=2)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		AggL [label="3D Agg (Dilation=4)" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		Fused [label="Fused Volume" color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+		AllDisp [label=all_disp_volume color="#d0a9f5" fillcolor="#f9f0ff" fontname=Helvetica penwidth=2.0 shape=box style="filled,rounded"]
+	}
+	MatchL -> GWC
+	MatchR -> GWC
+	GWC -> BaseVol
+	MatchL -> SP
+	ML -> SP [label=Prior fontcolor="#555555" fontname=Helvetica fontsize=10 style=dotted]
+	SP -> W
+	BaseVol -> AggS
+	BaseVol -> AggM
+	BaseVol -> AggL
+	W -> AggS [style=dotted]
+	W -> AggM [style=dotted]
+	W -> AggL [style=dotted]
+	AggS -> Fused [label=add_ fontcolor="#555555" fontname=Helvetica fontsize=10]
+	AggM -> Fused [label=add_ fontcolor="#555555" fontname=Helvetica fontsize=10]
+	AggL -> Fused [label=add_ fontcolor="#555555" fontname=Helvetica fontsize=10]
+	Fused -> AllDisp
+	subgraph cluster_phase4 {
+		color=gray fontname="Helvetica-Bold" label="Phase 4: Disparity Regression & Refinement" style=dashed
+		Hourglass [label="3D Hourglass" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		Disp0 [label="disp_0 (Initial)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		GRU [label="ConvGRU Update
+(iters=22)" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		DispN [label="disp_i+1" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		Up [label="Spatial Upsample" color="#a9d0f5" fillcolor="#f0f8ff" fontname=Helvetica shape=box style="filled,rounded"]
+		Final [label="Final Disparity Map" color="#a3e6a3" fillcolor="#e6ffe6" fontname="Helvetica-Bold" penwidth=2.0 shape=ellipse style=filled]
+	}
+	AllDisp -> Hourglass
+	Hourglass -> Disp0
+	Disp0 -> GRU
+	L -> GRU [label=Context fontcolor="#555555" fontname=Helvetica fontsize=10 style=dotted]
+	GRU -> DispN
+	DispN -> GRU [label=Loop fontcolor="#555555" fontname=Helvetica fontsize=10]
+	DispN -> Up
+	S2L -> Up [style=dotted]
+	Up -> Final
+}

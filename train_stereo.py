@@ -37,25 +37,23 @@ def sequence_loss(args, agg_preds, iter_preds, disp_gt, valid, loss_gamma=0.9):
 
     disp_loss = 0.0
     mag = torch.sum(disp_gt ** 2, dim=1).sqrt()
-    mask0 = ((valid >= 0.5) & (mag < max_disp)).unsqueeze(1)
-    mask1 = ((valid >= 0.5) & (mag < max_disp)).unsqueeze(1)
-    mask = ((valid >= 0.5) & (mag < max_disp)).unsqueeze(1)
-    assert mask.shape == disp_gt.shape, [mask.shape, disp_gt.shape]
-    assert not torch.isinf(disp_gt[mask.bool()]).any()
+    valid_mask = ((valid >= 0.5) & (mag < max_disp)).unsqueeze(1)
+    assert valid_mask.shape == disp_gt.shape, [valid_mask.shape, disp_gt.shape]
+    assert not torch.isinf(disp_gt[valid_mask.bool()]).any()
 
-    disp_loss += 1.0 * F.smooth_l1_loss(agg_preds[0][mask0.bool()], disp_gt[mask0.bool()], reduction='mean')
-    disp_loss += 0.5 * F.smooth_l1_loss(agg_preds[1][mask1.bool()], disp_gt[mask1.bool()], reduction='mean')
-    disp_loss += 0.2 * F.smooth_l1_loss(agg_preds[2][mask.bool()], disp_gt[mask.bool()], reduction='mean')
+    disp_loss += 1.0 * F.smooth_l1_loss(agg_preds[0][valid_mask.bool()], disp_gt[valid_mask.bool()], reduction='mean')
+    disp_loss += 0.5 * F.smooth_l1_loss(agg_preds[1][valid_mask.bool()], disp_gt[valid_mask.bool()], reduction='mean')
+    disp_loss += 0.2 * F.smooth_l1_loss(agg_preds[2][valid_mask.bool()], disp_gt[valid_mask.bool()], reduction='mean')
 
     for i in range(n_predictions):
         adjusted_loss_gamma = loss_gamma ** (15 / (n_predictions - 1))
         i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
         i_loss = (iter_preds[i] - disp_gt).abs()
-        assert i_loss.shape == mask.shape, [i_loss.shape, mask.shape, disp_gt.shape, iter_preds[i].shape]
-        disp_loss += i_weight * i_loss[mask.bool()].mean()
+        assert i_loss.shape == valid_mask.shape, [i_loss.shape, valid_mask.shape, disp_gt.shape, iter_preds[i].shape]
+        disp_loss += i_weight * i_loss[valid_mask.bool()].mean()
 
     epe = torch.sum((iter_preds[-1] - disp_gt) ** 2, dim=1).sqrt()
-    epe = epe.view(-1)[mask.view(-1)]
+    epe = epe.view(-1)[valid_mask.view(-1)]
 
     metrics = {
         'epe': epe.mean().item(),
@@ -211,18 +209,27 @@ def train(args):
                 if 'dfc2019' in args.train_datasets:
                     results = validate_dfc2019(model.module, iters=args.valid_iters)
                 elif 'whu' in args.train_datasets:
-                    results.update(validate_whu(model.module, iters=args.valid_iters))
+                    in_domain_results = validate_whu(model.module, iters=args.valid_iters, split='validation')
+                    for key, value in in_domain_results.items():
+                        results[f'whu-in-domain-{key}'] = value
+
+                    zero_shot_results = validate_whu(model.module, iters=args.valid_iters, split='test')
+                    for key, value in zero_shot_results.items():
+                        results[f'whu-zero-shot-{key}'] = value
 
                 logger.write_dict(results)
 
                 current_metric = None
                 if 'dfc-epe' in results:
                     current_metric = results['dfc-epe']
-                elif 'whu-epe' in results:
-                    current_metric = results['whu-epe']
+                # 修复：对齐真实的字典键名（双重 whu-）
+                elif 'whu-zero-shot-whu-edge-epe' in results:
+                    current_metric = results['whu-zero-shot-whu-edge-epe']
+                elif 'whu-in-domain-whu-epe' in results:
+                    current_metric = results['whu-in-domain-whu-epe']
 
                 if current_metric is not None:
-                    logging.info(f"Current EPE: {current_metric:.4f} (Best: {best_epe:.4f})")
+                    logging.info(f"Current Metric: {current_metric:.4f} (Best: {best_epe:.4f})")
                     if current_metric < best_epe:
                         best_epe = current_metric
                         best_save_path = Path(args.logdir + '/%s_best.pth' % args.name)

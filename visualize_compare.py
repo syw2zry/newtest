@@ -61,35 +61,51 @@ def apply_error_colormap(err, mask=None, max_err=5.0):
     return colored_bgr
 
 
-def add_label(img, text):
-    img_copy = img.copy()
+# ==================== [美学升级：带有白边隔离和顶部居中标签的排版器] ====================
+def format_image_with_label(img, text, bg_color=(255, 255, 255), text_color=(0, 0, 0)):
+    """在图像上方添加标签区域，并在四周添加边距，实现分离效果"""
+    top_margin = 60  # 顶部留白，用于写标签
+    bottom_margin = 15  # 底部留白
+    left_margin = 15  # 左侧留白
+    right_margin = 15  # 右侧留白
+
+    # 给原图四周加上白底边框 (这样拼接时图像之间就会有天然的缝隙)
+    padded_img = cv2.copyMakeBorder(
+        img, top_margin, bottom_margin, left_margin, right_margin,
+        cv2.BORDER_CONSTANT, value=bg_color
+    )
+
+    # 字体配置 (更学术的观感)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 1.0
+    font_scale = 1.1
     thickness = 2
+
+    # 获取文字尺寸，用于精确居中
     (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
 
-    overlay = img_copy.copy()
-    padding = 10
-    cv2.rectangle(overlay, (0, 0), (text_width + padding * 2, text_height + padding * 2 + baseline), (0, 0, 0), -1)
-    alpha = 0.6
-    cv2.addWeighted(overlay, alpha, img_copy, 1 - alpha, 0, img_copy)
-    cv2.putText(img_copy, text, (padding, text_height + padding), font, font_scale, (255, 255, 255), thickness,
-                cv2.LINE_AA)
+    # 计算文字的放置坐标 (水平居中，垂直靠顶部)
+    text_x = left_margin + max(0, (img.shape[1] - text_width) // 2)
+    text_y = top_margin - 15
 
-    return img_copy
+    # 在顶部留白处画上纯色文字
+    cv2.putText(
+        padded_img, text, (text_x, text_y),
+        font, font_scale, text_color, thickness, cv2.LINE_AA
+    )
+
+    return padded_img
 
 
-# ==================== [核心功能：智能加载器] ====================
+# =========================================================================================
+
 def load_model(args, ckpt_path, arch):
     """动态实例化模型并加载权重，自动处理字典兼容性问题"""
-    # 临时修改 args，让 IGEVStereo.__init__ 正确初始化对应架构的模块
     args.model_arch = arch
     model = torch.nn.DataParallel(IGEVStereo(args), device_ids=[0])
 
     print(f"Loading {arch} checkpoint: {ckpt_path}")
     checkpoint = torch.load(ckpt_path)
 
-    # 兼容旧版权重的 'gbc_volume' -> 'guided_volume'
     new_checkpoint = {}
     for k, v in checkpoint.items():
         if 'gbc_volume' in k:
@@ -98,19 +114,13 @@ def load_model(args, ckpt_path, arch):
         else:
             new_checkpoint[k] = v
 
-    # 关闭严格匹配模式，允许缺失新模块的参数
-    missing_keys, unexpected_keys = model.load_state_dict(new_checkpoint, strict=False)
-    
-    # 打印提示，避免未来忘记
-    if len(missing_keys) > 0:
-        print(f"\n[Warning] 加载权重时缺失了 {len(missing_keys)} 个 Keys。如果您当前加载的是 Baseline 权重，此为正常现象，不影响推理。")
-    
+        # 关闭严格匹配模式，允许缺失新模块的参数
+        missing_keys, unexpected_keys = model.load_state_dict(new_checkpoint, strict=False)
+
     model.cuda()
     model.eval()
     return model
 
-
-# ================================================================
 
 @torch.no_grad()
 def visualize_compare_output(model1, model2, args):
@@ -171,15 +181,15 @@ def visualize_compare_output(model1, model2, args):
         viz_err1 = apply_error_colormap(err_map1, mask=valid_mask, max_err=5.0)
         viz_err2 = apply_error_colormap(err_map2, mask=valid_mask, max_err=5.0)
 
-        # --- 添加标签 ---
-        img_show = add_label(img_show, "Left Image")
-        viz_gt = add_label(viz_gt, "Ground Truth")
-        viz_pr1 = add_label(viz_pr1, f"Pred: {args.name1}")
-        viz_pr2 = add_label(viz_pr2, f"Pred: {args.name2}")
-        viz_err1 = add_label(viz_err1, f"Err: {args.name1}")
-        viz_err2 = add_label(viz_err2, f"Err: {args.name2}")
+        # --- 应用全新的美学边框和标签 ---
+        img_show = format_image_with_label(img_show, "Left Image")
+        viz_gt = format_image_with_label(viz_gt, "Ground Truth")
+        viz_pr1 = format_image_with_label(viz_pr1, f"Pred: {args.name1}")
+        viz_pr2 = format_image_with_label(viz_pr2, f"Pred: {args.name2}")
+        viz_err1 = format_image_with_label(viz_err1, f"Err: {args.name1}")
+        viz_err2 = format_image_with_label(viz_err2, f"Err: {args.name2}")
 
-        # --- 组装 2x3 论文网格图 ---
+        # --- 组装 2x3 网格图 ---
         row1 = np.hstack([img_show, viz_pr1, viz_pr2])
         row2 = np.hstack([viz_gt, viz_err1, viz_err2])
         concat = np.vstack([row1, row2])
@@ -192,7 +202,6 @@ def visualize_compare_output(model1, model2, args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    # ==== [新增：双模型对比参数] ====
     parser.add_argument('--ckpt1', required=True, help="Checkpoint for Model 1")
     parser.add_argument('--arch1', required=True, choices=['baseline', 'ours'], help="Architecture for Model 1")
     parser.add_argument('--name1', default='Baseline', help="Display name for Model 1")
@@ -200,10 +209,9 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt2', required=True, help="Checkpoint for Model 2")
     parser.add_argument('--arch2', required=True, choices=['baseline', 'ours'], help="Architecture for Model 2")
     parser.add_argument('--name2', default='Ours', help="Display name for Model 2")
-    # ================================
 
     parser.add_argument('--data_path', default=None)
-    parser.add_argument('--output_directory', default="vis_test/compare_results")
+    parser.add_argument('--output_directory', default="vis_test/paper_comparison")
     parser.add_argument('--max_files', type=int, default=50)
     parser.add_argument('--split', default='test', choices=['val', 'validation', 'test'])
     parser.add_argument('--dataset', default='dfc2019', choices=['dfc2019', 'whu'])
@@ -227,9 +235,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # 加载模型 1
     model1 = load_model(args, args.ckpt1, args.arch1)
-    # 加载模型 2
     model2 = load_model(args, args.ckpt2, args.arch2)
 
     visualize_compare_output(model1, model2, args)

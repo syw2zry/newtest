@@ -225,6 +225,7 @@ class IGEVStereo(nn.Module):
             features_left = self.feature(image1)
             features_right = self.feature(image2)
             
+            # --- 共用基础特征提取 ---
             stem_2x = self.stem_2(image1)
             stem_4x = self.stem_4(stem_2x)
             stem_2y = self.stem_2(image2)
@@ -232,29 +233,19 @@ class IGEVStereo(nn.Module):
             
             if getattr(self.args, 'model_arch', 'ours') == 'ours':
                 # 【Ours 路径】
-                # A. 分别提取左右图边缘先验 (Mask)
                 mask_left = self.edge_guidance(image1)
                 mask_right = self.edge_guidance(image2) 
                 
-                # B. 频域解耦
                 f_low_l, f_high_l = self.frequency_decoupler(features_left[0])
                 f_low_r, f_high_r = self.frequency_decoupler(features_right[0])
                 
-                # C. 边缘引导的特征截断 (各自使用自身的物理边界，严格原地操作)
                 f_high_l_modulated = f_high_l.mul_(1.0 + mask_left)
                 f_high_r_modulated = f_high_r.mul_(1.0 + mask_right)
                 
-                # D. 特征重组 (严格原地操作)
                 features_left[0] = f_low_l.add_(f_high_l_modulated)
                 features_right[0] = f_low_r.add_(f_high_r_modulated)
-
-                # E. 经过原版 Stem 与卷积层
-                stem_2x = self.stem_2(image1)
-                stem_4x = self.stem_4(stem_2x)
-                stem_2y = self.stem_2(image2)
-                stem_4y = self.stem_4(stem_2y)
                 
-                # F. 防御性对齐，防止因裁剪带来的 1 像素维度不匹配
+                # 防御性对齐
                 if features_left[0].shape[2:] != stem_4x.shape[2:]:
                     stem_4x = F.interpolate(stem_4x, size=features_left[0].shape[2:], mode='bilinear', align_corners=False)
                     stem_4y = F.interpolate(stem_4y, size=features_right[0].shape[2:], mode='bilinear', align_corners=False)
@@ -265,10 +256,15 @@ class IGEVStereo(nn.Module):
                 match_left = self.desc(self.conv(features_left[0]))
                 match_right = self.desc(self.conv(features_right[0])) 
                 
-                # G. 使用我们的自适应多尺度代价卷
                 all_disp_volume = self.guided_volume(match_left, match_right, mask_left)
 
             else:
+                # 【Baseline 路径】
+                # 同样加上防御性对齐，防止 Baseline 训练时 batch 形状崩塌
+                if features_left[0].shape[2:] != stem_4x.shape[2:]:
+                    stem_4x = F.interpolate(stem_4x, size=features_left[0].shape[2:], mode='bilinear', align_corners=False)
+                    stem_4y = F.interpolate(stem_4y, size=features_right[0].shape[2:], mode='bilinear', align_corners=False)
+
                 features_left[0] = torch.cat((features_left[0], stem_4x), 1)
                 features_right[0] = torch.cat((features_right[0], stem_4y), 1)
 
@@ -276,7 +272,6 @@ class IGEVStereo(nn.Module):
                 match_right = self.desc(self.conv(features_right[0])) 
                 
                 all_disp_volume = build_gwc_volume(match_left, match_right, self.args.max_disp//4, 8)
-
 
             disp_volume0 = all_disp_volume[:,:,:self.args.s_disp_range]
             disp_volume1 = self.patch0(all_disp_volume[:,:,:self.args.m_disp_range])

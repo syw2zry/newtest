@@ -251,17 +251,43 @@ class WHUStereo(StereoDataset):
         disp_path = self.disparity_list[index]
         img1_path, img2_path = self.image_list[index]
 
-        img1 = frame_utils.read_gen(img1_path)
-        img2 = frame_utils.read_gen(img2_path)
-        disp = np.array(frame_utils.read_gen(disp_path)).astype(np.float32) / 256.0
+        # 1. 强制使用 rasterio 安全读取卫星 tiff 文件
+        with rasterio.open(img1_path) as src:
+            img1_read = src.read().transpose(1, 2, 0)
+        with rasterio.open(img2_path) as src:
+            img2_read = src.read().transpose(1, 2, 0)
+        with rasterio.open(disp_path) as src:
+            disp = src.read(1)  # 视差图只取第一个通道
 
-        img1 = np.array(img1).astype(np.uint8)
-        img2 = np.array(img2).astype(np.uint8)
-        disp = np.array(disp).astype(np.float32)
+        # 2. 防御性通道对齐：确保 RGB 三通道
+        if img1_read.shape[-1] >= 3:
+            img1 = img1_read[..., :3]
+            img2 = img2_read[..., :3]
+        else:
+            # 如果是单波段灰度图，复制为三通道
+            img1 = np.tile(img1_read[..., :1], (1, 1, 3))
+            img2 = np.tile(img2_read[..., :1], (1, 1, 3))
 
+        img1 = np.array(img1).astype(np.float32)
+        img2 = np.array(img2).astype(np.float32)
+
+        # 3. 卫星影像动态范围归一化 (防止 16-bit 像素溢出)
+        if img1.max() > 255:
+            img1 = (img1 / img1.max()) * 255.0
+        if img2.max() > 255:
+            img2 = (img2 / img2.max()) * 255.0
+
+        img1 = np.clip(img1, 0, 255).astype(np.uint8)
+        img2 = np.clip(img2, 0, 255).astype(np.uint8)
+
+        # 4. 解析视差图 (延续原项目除以 256.0 的尺度)
+        disp = np.array(disp).astype(np.float32) / 256.0
+
+        # 5. 生成有效掩膜与 flow 张量
         valid = (disp > 0) & (disp < 10000)
         flow = np.stack([disp, np.zeros_like(disp)], axis=-1)
 
+        # 6. 数据增强与张量化
         if self.augmentor is not None:
             img1, img2, flow, valid = self.augmentor(img1, img2, flow, valid)
 
@@ -281,7 +307,6 @@ class WHUStereo(StereoDataset):
 
         flow = flow[:1]
         return self.image_list[index] + [self.disparity_list[index]], img1, img2, flow, valid.float()
-
 
 def fetch_dataloader(args):
     """ Create the data loader for satellite stereo datasets (DFC2019 / WHU) """

@@ -33,11 +33,25 @@ def sequence_loss(args, agg_preds, iter_preds, disp_gt, valid, loss_gamma=0.9):
     n_predictions = len(iter_preds)
     assert n_predictions >= 1
     
+    # [全局修复 1] 动态读取最大视差，释放高分辨率卫星影像中的高楼大厦监督信号！
     max_disp = args.max_disp
 
     disp_loss = 0.0
     mag = torch.sum(disp_gt ** 2, dim=1).sqrt()
     valid_mask = ((valid >= 0.5) & (mag < max_disp)).unsqueeze(1)
+    
+    # ====================================================================
+    # [全局修复 2] 🚨 防御性编程：防止水域/纯黑边缘导致空掩膜，引发 NaN 梯度爆炸 🚨
+    # ====================================================================
+    if valid_mask.sum() < 10:  # 如果当前裁剪块里有效像素极少
+        # 构建一个连着计算图的虚拟 0 Loss，骗过 PyTorch 的反向传播，安全跳过此 Batch
+        dummy_loss = sum([p.sum() for p in iter_preds]) * 0.0
+        if isinstance(agg_preds, list):
+            dummy_loss += sum([p.sum() for p in agg_preds]) * 0.0
+        metrics = {'epe': 0.0, '1px': 0.0, '3px': 0.0, '5px': 0.0}
+        return dummy_loss, metrics
+    # ====================================================================
+
     assert valid_mask.shape == disp_gt.shape, [valid_mask.shape, disp_gt.shape]
     assert not torch.isinf(disp_gt[valid_mask.bool()]).any()
 
@@ -199,10 +213,14 @@ def train(args):
             logger.push(metrics)
 
             if total_steps % validation_frequency == validation_frequency - 1:
+                import math # 确保导入了 math 以监控 NaN
                 logging.info(
                     f"\n{'=' * 60}\n>>> STATUS: [Step {total_steps + 1}] STOP Training -> START Validation\n{'=' * 60}")
                 
+                # [全局修复 3] 路径斜杠安全处理，获取防崩溃的文件名
                 safe_name = args.name.replace('/', '_')
+                
+                # [全局修复 4] 恢复中间过程的阶段性模型保存
                 save_path = Path(args.logdir + '/%d_%s.pth' % (total_steps + 1, safe_name))
                 logging.info(f"Saving intermediate model to {save_path.absolute()}")
                 torch.save(model.state_dict(), save_path)
@@ -211,45 +229,47 @@ def train(args):
                 if 'dfc2019' in args.train_datasets:
                     results = validate_dfc2019(model.module, iters=args.valid_iters)
                 elif 'whu' in args.train_datasets:
+                    # [全局修复 5] 采用 TensorBoard 文件夹折叠方案，清理长串前缀
+                    # 1. 验证同分布 (In-Domain)
                     in_domain_results = validate_whu(model.module, iters=args.valid_iters, split='validation')
                     for key, value in in_domain_results.items():
-                        results[f'whu-in-domain-{key}'] = value
+                        clean_key = key.replace('whu-', '')  # 去除冗余的 whu-
+                        results[f'InDomain/{clean_key}'] = value # 转为 InDomain/epe 等
 
+                    # 2. 验证跨城泛化 (Zero-Shot)
                     zero_shot_results = validate_whu(model.module, iters=args.valid_iters, split='test')
                     for key, value in zero_shot_results.items():
-                        results[f'whu-zero-shot-{key}'] = value
+                        clean_key = key.replace('whu-', '')
+                        results[f'ZeroShot/{clean_key}'] = value # 转为 ZeroShot/edge-epe 等
 
                 logger.write_dict(results)
 
-# ==========================================================
-                # --- 1. 获取当前评估的核心指标 (严格对齐字典键名) ---
+                # ==========================================================
+                # --- 获取当前评估的核心指标 (严格对齐刚刚修改的清爽键名) ---
                 # ==========================================================
                 current_metric = None
                 if 'dfc-epe' in results:
                     current_metric = results['dfc-epe']
-                # 针对 EdgeFreq-Net，强制盯紧跨城泛化的边缘指标！
-                elif 'whu-zero-shot-whu-edge-epe' in results: 
-                    current_metric = results['whu-zero-shot-whu-edge-epe']
-                elif 'whu-in-domain-whu-epe' in results:
-                    current_metric = results['whu-in-domain-whu-epe']
-                elif 'whu-epe' in results: # 兼容单路验证的情况
-                    current_metric = results['whu-epe']
+                # 针对 EdgeFreq-Net，强制盯紧跨城泛化的边缘物理保真度！
+                elif 'ZeroShot/edge-epe' in results: 
+                    current_metric = results['ZeroShot/edge-epe']
+                elif 'InDomain/epe' in results:
+                    current_metric = results['InDomain/epe']
 
                 # ==========================================================
-                # --- 2. 最佳模型判定与安全保存 ---
+                # [全局修复 6] 最佳模型判定与 NaN 崩溃监控
                 # ==========================================================
                 if current_metric is not None:
-                    logging.info(f"Current Metric: {current_metric:.4f} (Best: {best_epe:.4f})")
-                    if current_metric < best_epe:
-                        best_epe = current_metric
-                        
-                        # 确保已经定义了 safe_name (上一段代码中应该已有)
-                        safe_name = args.name.replace('/', '_') 
-                        
-                        # 安全保存最优模型
-                        best_save_path = Path(args.logdir + '/%s_best.pth' % safe_name)
-                        logging.info(f"New best model! Saving to {best_save_path.absolute()}")
-                        torch.save(model.state_dict(), best_save_path)
+                    if math.isnan(current_metric):
+                        logging.error(f"❌ 严重警告: 当前验证指标为 NaN！模型在验证集上已崩！请考虑从上一个 checkpoint 恢复。")
+                    else:
+                        logging.info(f"Current Metric: {current_metric:.4f} (Best: {best_epe:.4f})")
+                        if current_metric < best_epe:
+                            best_epe = current_metric
+                            # 安全保存最优模型
+                            best_save_path = Path(args.logdir + '/%s_best.pth' % safe_name)
+                            logging.info(f"🌟 New best model! Saving to {best_save_path.absolute()}")
+                            torch.save(model.state_dict(), best_save_path)
                 else:
                     logging.warning("Warning: current_metric is None! Check if your dictionary keys match.")
 
@@ -266,7 +286,7 @@ def train(args):
 
     print("FINISHED TRAINING")
     logger.close()
-    PATH = args.logdir + '/%s.pth' % args.name
+    PATH = args.logdir + '/%s.pth' % args.name.replace('/', '_')
     torch.save(model.state_dict(), PATH)
 
     return PATH

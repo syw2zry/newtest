@@ -237,9 +237,18 @@ class WHUStereo(StereoDataset):
         left_files = sorted(glob(os.path.join(left_dir, '*_left_*.tiff')))
 
         for left_path in left_files:
-            right_path = left_path.replace('_left_', '_right_').replace(left_dir, right_dir)
-            disp_path = left_path.replace('_left_', '_disparity_').replace(left_dir, disp_dir)
+            # 1. 提取纯文件名 (例如: KM_left_1.tiff)
+            fname = os.path.basename(left_path)
+            
+            # 2. 仅对文件名进行极其安全的替换
+            r_fname = fname.replace('_left_', '_right_')
+            d_fname = fname.replace('_left_', '_disparity_')
 
+            # 3. 与对应的物理文件夹重新拼接
+            right_path = os.path.join(right_dir, r_fname)
+            disp_path = os.path.join(disp_dir, d_fname)
+
+            # 4. 存在性校验
             if os.path.exists(left_path) and os.path.exists(right_path) and os.path.exists(disp_path):
                 self.image_list.append([left_path, right_path])
                 self.disparity_list.append(disp_path)

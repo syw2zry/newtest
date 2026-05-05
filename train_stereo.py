@@ -203,6 +203,15 @@ def train(args):
             logger.writer.add_scalar(f'learning_rate', optimizer.param_groups[0]['lr'], global_batch_num)
             global_batch_num += 1
 
+            # ==========================================================
+            # 🛡️ 终极防御装甲：必须补上这块！拦截 FP16 溢出导致的 NaN/Inf Loss
+            # ==========================================================
+            if torch.isnan(loss) or torch.isinf(loss):
+                logging.warning(f"🚨 [Step {total_steps}] 检测到 NaN/Inf Loss (FP16 溢出)！已拦截，保护模型权重，跳过此 Batch。")
+                optimizer.zero_grad() # 清空这个剧毒的梯度
+                continue              # 直接跳出当前 batch，救模型一命！
+            # ==========================================================
+
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

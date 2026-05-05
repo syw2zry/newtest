@@ -1,5 +1,4 @@
 import sys
-
 sys.path.append('core')
 
 import os
@@ -25,7 +24,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 
 def apply_jet_colormap(disp, mask=None, vmax=None):
-    """将单通道视差图转换为 Jet 伪彩色图"""
     vmin = 0
     if vmax is None:
         if mask is not None and mask.sum() > 0:
@@ -50,58 +48,62 @@ def apply_jet_colormap(disp, mask=None, vmax=None):
 
 
 def apply_error_colormap(err, mask=None, max_err=5.0):
-    """
-    专门用于误差图的伪彩色映射 (通常使用 hot 或 turbo 色带)
-    低误差显示为黑/暗红，高误差显示为亮黄/白
-    :param max_err: 截断误差阈值，默认超过 5 个像素的误差显示为最亮
-    """
     err_norm = err / max_err
     err_norm = np.clip(err_norm, 0, 1)
-
-    # 使用 'hot' 或 'inferno' 色带非常适合展示误差
     cmap = plt.get_cmap('hot')
     colored = (cmap(err_norm)[:, :, :3] * 255).astype(np.uint8)
     colored_bgr = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
 
     if mask is not None:
-        colored_bgr[~mask] = 0  # 无效区域全黑
+        colored_bgr[~mask] = 0
 
     return colored_bgr
 
 
-def add_label(img, text):
-    """在图片左上角添加带半透明背景的专业标签"""
-    img_copy = img.copy()
+def format_image_with_label(img, text, bg_color=(255, 255, 255), text_color=(0, 0, 0)):
+    """专业的白底隔离+居中标签排版"""
+    top_margin = 60
+    bottom_margin = 15
+    left_margin = 15
+    right_margin = 15
+
+    padded_img = cv2.copyMakeBorder(
+        img, top_margin, bottom_margin, left_margin, right_margin,
+        cv2.BORDER_CONSTANT, value=bg_color
+    )
+
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 1.0
+    font_scale = 1.1
     thickness = 2
 
-    # 获取文字大小
     (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
 
-    # 绘制半透明黑色背景框
-    overlay = img_copy.copy()
-    padding = 10
-    cv2.rectangle(overlay, (0, 0), (text_width + padding * 2, text_height + padding * 2 + baseline), (0, 0, 0), -1)
-    alpha = 0.6  # 透明度
-    cv2.addWeighted(overlay, alpha, img_copy, 1 - alpha, 0, img_copy)
+    text_x = left_margin + max(0, (img.shape[1] - text_width) // 2)
+    text_y = top_margin - 15
 
-    # 绘制白色文字
-    cv2.putText(img_copy, text, (padding, text_height + padding), font, font_scale, (255, 255, 255), thickness,
-                cv2.LINE_AA)
+    cv2.putText(
+        padded_img, text, (text_x, text_y),
+        font, font_scale, text_color, thickness, cv2.LINE_AA
+    )
 
-    return img_copy
+    return padded_img
 
 
 @torch.no_grad()
-def visualize_dfc_output(model, args):
+def visualize_single_output(model, args):
     model.eval()
 
-    root_path = args.data_path if args.data_path else '/home/roy/projects/YAOWEI/data/dfc2019-big'
-    val_dataset = datasets.DFC2019(aug_params=None, root=root_path, split=args.split)
+    # ==================== [动态数据集路由] ====================
+    if args.dataset == 'whu':
+        root_path = args.data_path if args.data_path else '/home/roy/projects/YAOWEI/data/WHU_dataset_big'
+        val_dataset = datasets.WHUStereo(aug_params=None, root=root_path, split=args.split)
+    else:
+        root_path = args.data_path if args.data_path else '/home/roy/projects/YAOWEI/data/dfc2019-big'
+        val_dataset = datasets.DFC2019(aug_params=None, root=root_path, split=args.split)
+    # ==========================================================
 
     max_count = args.max_files if args.max_files > 0 else len(val_dataset)
-    print(f"Dataset Loaded. Total valid images: {len(val_dataset)}. Will process: {max_count}")
+    print(f"Dataset Loaded ({args.dataset}). Total valid images: {len(val_dataset)}. Will process: {max_count}")
 
     val_loader = data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
 
@@ -126,19 +128,18 @@ def visualize_dfc_output(model, args):
 
         disp_pr = padder.unpad(disp_pr).cpu().numpy().squeeze()
 
-        # 1. 准备左图 RGB
+        # 准备左图 RGB
         img_np = image1[0].permute(1, 2, 0).cpu().numpy()
         img_np = np.clip(img_np, 0, 255).astype(np.uint8)
         img_show = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-        # 2. 准备 GT 和 Mask
+        # 准备 GT 和 Mask
         disp_gt = flow_gt[0, 0].cpu().numpy()
         valid_mask = (valid_gt[0].cpu().numpy() > 0.5).squeeze()
 
         # 计算绝对误差
         err_map = np.abs(disp_pr - disp_gt)
 
-        # 3. 渲染伪彩色
         if valid_mask.sum() > 0:
             vmax = np.percentile(disp_gt[valid_mask], 98)
         else:
@@ -146,20 +147,17 @@ def visualize_dfc_output(model, args):
 
         viz_gt = apply_jet_colormap(disp_gt, mask=valid_mask, vmax=vmax)
         viz_pr = apply_jet_colormap(disp_pr, mask=None, vmax=vmax)
-
-        # 渲染误差图 (阈值设为 5px，超过5px的误差将显示为最亮的颜色)
         viz_err = apply_error_colormap(err_map, mask=valid_mask, max_err=5.0)
 
-        # 4. 添加文字标签
-        img_show = add_label(img_show, "Left Image")
-        viz_gt = add_label(viz_gt, "Ground Truth")
-        viz_pr = add_label(viz_pr, "Prediction")
-        viz_err = add_label(viz_err, "Error Map (0-5px)")
+        # --- 重点：应用论文级别的排版 ---
+        img_show = format_image_with_label(img_show, "Left Image")
+        viz_gt = format_image_with_label(viz_gt, "Ground Truth")
+        viz_pr = format_image_with_label(viz_pr, "Our Prediction")
+        viz_err = format_image_with_label(viz_err, "Error Map")
 
-        # 5. 拼接成四格图: [ 原图 | 真实视差 | 预测视差 | 误差图 ]
+        # 拼接成 1x4 的长条图 (中间会有漂亮的白底空隙)
         concat = np.hstack([img_show, viz_gt, viz_pr, viz_err])
 
-        # 保存图像
         save_path = output_directory / f"{base_name}_vis.png"
         cv2.imwrite(str(save_path), concat)
 
@@ -170,10 +168,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--restore_ckpt', help="restore checkpoint", required=True)
     parser.add_argument('--data_path', help="dataset root path", default=None)
-    parser.add_argument('--output_directory', default="result_vis_dfc")
+    parser.add_argument('--output_directory', default="result_vis_whu")
     parser.add_argument('--max_files', type=int, default=50)
     parser.add_argument('--split', default='test', choices=['val', 'validation', 'test'])
-    parser.add_argument('--dataset', default='dfc2019', choices=['dfc2019', 'whu'], help="which dataset to use")
+    parser.add_argument('--dataset', default='whu', choices=['dfc2019', 'whu'], help="which dataset to use")
+    
     # 核心网络参数
     parser.add_argument('--mixed_precision', action='store_true', default=False)
     parser.add_argument('--precision_dtype', default='float32', choices=['float16', 'bfloat16', 'float32'])
@@ -199,8 +198,6 @@ if __name__ == '__main__':
     print(f"Loading checkpoint: {args.restore_ckpt}")
     checkpoint = torch.load(args.restore_ckpt)
 
-    # ==================== [新增：兼容旧版权重命名] ====================
-    # 将旧的 'gbc_volume' 键名动态替换为新的 'guided_volume'
     new_checkpoint = {}
     for k, v in checkpoint.items():
         if 'gbc_volume' in k:
@@ -208,10 +205,8 @@ if __name__ == '__main__':
             new_checkpoint[new_key] = v
         else:
             new_checkpoint[k] = v
-    # =================================================================
 
-    # 使用转换后的 new_checkpoint 
-    model.load_state_dict(new_checkpoint, strict=True)
+    model.load_state_dict(new_checkpoint, strict=False)
     model.cuda()
 
-    visualize_dfc_output(model, args)
+    visualize_single_output(model, args)

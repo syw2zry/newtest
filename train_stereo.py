@@ -236,17 +236,18 @@ def train(args):
 
                 results = {}
                 if 'dfc2019' in args.train_datasets:
-                    dfc_results = evaluate_dataset(model.module, 'dfc2019', 'val', iters=args.valid_iters)
+                    # 全部写明参数名，最安全！
+                    dfc_results = evaluate_dataset(model.module, dataset_name='dfc2019', split='val', iters=args.valid_iters)
                     for key, value in dfc_results.items():
                         results[f'dfc-{key}'] = value 
                 elif 'whu' in args.train_datasets:
                     # 1. 验证同分布 (In-Domain)
-                    in_domain_results = evaluate_dataset(model.module, 'whu', 'validation', iters=args.valid_iters)
+                    in_domain_results = evaluate_dataset(model.module, dataset_name='whu', split='validation', iters=args.valid_iters)
                     for key, value in in_domain_results.items():
                         results[f'InDomain/{key}'] = value
 
                     # 2. 验证跨城泛化 (Zero-Shot)
-                    zero_shot_results = evaluate_dataset(model.module, 'whu', 'test', iters=args.valid_iters)
+                    zero_shot_results = evaluate_dataset(model.module, dataset_name='whu', split='test', iters=args.valid_iters)
                     for key, value in zero_shot_results.items():
                         results[f'ZeroShot/{key}'] = value
 

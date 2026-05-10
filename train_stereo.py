@@ -22,7 +22,7 @@ import torch.optim as optim
 from torch.cuda.amp import GradScaler
 
 from core.igev_stereo import IGEVStereo
-from evaluate_stereo import validate_dfc2019, validate_whu
+from evaluate_stereo import evaluate_dataset
 import core.stereo_datasets as datasets
 import torch.nn.functional as F
 
@@ -236,20 +236,20 @@ def train(args):
 
                 results = {}
                 if 'dfc2019' in args.train_datasets:
-                    results = validate_dfc2019(model.module, iters=args.valid_iters)
+                    # 注意 split 取决于你 dfc2019 数据集的设定，通常是 'val'
+                    dfc_results = evaluate_dataset(model.module, dataset_name='dfc2019', split='val', iters=args.valid_iters)
+                    for key, value in dfc_results.items():
+                        results[f'dfc-{key}'] = value 
                 elif 'whu' in args.train_datasets:
-                    # [全局修复 5] 采用 TensorBoard 文件夹折叠方案，清理长串前缀
                     # 1. 验证同分布 (In-Domain)
-                    in_domain_results = validate_whu(model.module, iters=args.valid_iters, split='validation')
+                    in_domain_results = evaluate_dataset(model.module, dataset_name='whu', split='validation', iters=args.valid_iters)
                     for key, value in in_domain_results.items():
-                        clean_key = key.replace('whu-', '')  # 去除冗余的 whu-
-                        results[f'InDomain/{clean_key}'] = value # 转为 InDomain/epe 等
+                        results[f'InDomain/{key}'] = value
 
                     # 2. 验证跨城泛化 (Zero-Shot)
-                    zero_shot_results = validate_whu(model.module, iters=args.valid_iters, split='test')
+                    zero_shot_results = evaluate_dataset(model.module, dataset_name='whu', split='test', iters=args.valid_iters)
                     for key, value in zero_shot_results.items():
-                        clean_key = key.replace('whu-', '')
-                        results[f'ZeroShot/{clean_key}'] = value # 转为 ZeroShot/edge-epe 等
+                        results[f'ZeroShot/{key}'] = value
 
                 logger.write_dict(results)
 
@@ -257,13 +257,13 @@ def train(args):
                 # --- 获取当前评估的核心指标 (严格对齐刚刚修改的清爽键名) ---
                 # ==========================================================
                 current_metric = None
-                if 'dfc-epe' in results:
-                    current_metric = results['dfc-epe']
-                # 针对 EdgeFreq-Net，强制盯紧跨城泛化的边缘物理保真度！
-                elif 'ZeroShot/edge-epe' in results: 
-                    current_metric = results['ZeroShot/edge-epe']
-                elif 'InDomain/epe' in results:
-                    current_metric = results['InDomain/epe']
+                if 'dfc-global_epe' in results:
+                    current_metric = results['dfc-global_epe']
+                # 针对边缘保真度，现在的新键名是带下划线的 edge_epe
+                elif 'ZeroShot/edge_epe' in results: 
+                    current_metric = results['ZeroShot/edge_epe']
+                elif 'InDomain/global_epe' in results:
+                    current_metric = results['InDomain/global_epe']
 
                 # ==========================================================
                 # [全局修复 6] 最佳模型判定与 NaN 崩溃监控
@@ -331,7 +331,7 @@ if __name__ == '__main__':
     parser.add_argument('--corr_levels', type=int, default=2, help="number of levels in the correlation pyramid")
     parser.add_argument('--corr_radius', type=int, default=4, help="width of the correlation pyramid")
     parser.add_argument('--n_downsample', type=int, default=2, help="resolution of the disparity field (1/2^K)")
-    parser.add_argument('--n_gru_layers', type=int, default=3, help="number of hidden GRU levels")
+    parser.add_argument('--n_gru_layers', type=int, default=2, help="number of hidden GRU levels")
     parser.add_argument('--hidden_dims', nargs='+', type=int, default=[128] * 3,
                         help="hidden state and context dimensions")
     parser.add_argument('--max_disp', type=int, default=768, help="max disp range")

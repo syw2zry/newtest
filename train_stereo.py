@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import re
-
+import torch.utils.data as data
 from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
@@ -234,20 +234,31 @@ def train(args):
                 logging.info(f"Saving intermediate model to {save_path.absolute()}")
                 torch.save(model.state_dict(), save_path)
 
+
+                
                 results = {}
                 if 'dfc2019' in args.train_datasets:
-                    # 全部写明参数名，最安全！
-                    dfc_results = evaluate_dataset(model.module, dataset_name='dfc2019', split='val', iters=args.valid_iters)
+                    val_dataset = datasets.DFC2019({}, split='val')
+                    val_loader = data.DataLoader(val_dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=4)
+                    
+                    dfc_results = evaluate_dataset(model.module, val_loader, iters=args.valid_iters, mixed_prec=args.mixed_precision)
                     for key, value in dfc_results.items():
                         results[f'dfc-{key}'] = value 
+                        
                 elif 'whu' in args.train_datasets:
                     # 1. 验证同分布 (In-Domain)
-                    in_domain_results = evaluate_dataset(model.module, dataset_name='whu', split='validation', iters=args.valid_iters)
+                    in_domain_dataset = datasets.WHUStereo({}, split='validation')
+                    in_domain_loader = data.DataLoader(in_domain_dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=4)
+                    
+                    in_domain_results = evaluate_dataset(model.module, in_domain_loader, iters=args.valid_iters, mixed_prec=args.mixed_precision)
                     for key, value in in_domain_results.items():
                         results[f'InDomain/{key}'] = value
 
                     # 2. 验证跨城泛化 (Zero-Shot)
-                    zero_shot_results = evaluate_dataset(model.module, dataset_name='whu', split='test', iters=args.valid_iters)
+                    zero_shot_dataset = datasets.WHUStereo({}, split='test')
+                    zero_shot_loader = data.DataLoader(zero_shot_dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=4)
+                    
+                    zero_shot_results = evaluate_dataset(model.module, zero_shot_loader, iters=args.valid_iters, mixed_prec=args.mixed_precision)
                     for key, value in zero_shot_results.items():
                         results[f'ZeroShot/{key}'] = value
 

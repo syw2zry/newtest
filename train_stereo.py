@@ -10,6 +10,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 
 import argparse
 import logging
+import math
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
@@ -77,6 +78,128 @@ def sequence_loss(args, agg_preds, iter_preds, disp_gt, valid, loss_gamma=0.9):
     }
 
     return disp_loss, metrics
+
+
+def frequency_orthogonal_loss(feat_low: torch.Tensor, feat_high: torch.Tensor, 
+                               ortho_weight: float = 0.1, smooth_weight: float = 0.05, 
+                               sharp_weight: float = 0.05) -> torch.Tensor: 
+    """ 
+    频域正交损失：防止高低频特征语义坍塌 
+    """ 
+    feat_low = feat_low.float() 
+    feat_high = feat_high.float() 
+    
+    B, C, H, W = feat_low.shape 
+    
+    feat_low_flat = feat_low.view(B, C, -1) 
+    feat_high_flat = feat_high.view(B, C, -1) 
+    
+    feat_low_norm = F.normalize(feat_low_flat, p=2, dim=2) 
+    feat_high_norm = F.normalize(feat_high_flat, p=2, dim=2) 
+    
+    cos_sim = torch.bmm(feat_low_norm, feat_high_norm.transpose(1, 2)) 
+    ortho_loss = cos_sim.abs().mean() 
+    
+    grad_x_low = feat_low[:, :, :, 1:] - feat_low[:, :, :, :-1] 
+    grad_y_low = feat_low[:, :, 1:, :] - feat_low[:, :, :-1, :] 
+    smooth_loss = (grad_x_low.abs().mean() + grad_y_low.abs().mean()) * 0.5 
+    
+    grad_x_high = feat_high[:, :, :, 1:] - feat_high[:, :, :, :-1] 
+    grad_y_high = feat_high[:, :, 1:, :] - feat_high[:, :, :-1, :] 
+    
+    grad_x_high_aligned = grad_x_high[:, :, :-1, :] 
+    grad_y_high_aligned = grad_y_high[:, :, :, :-1] 
+    
+    grad_high_mag = (grad_x_high_aligned.abs() + grad_y_high_aligned.abs()) * 0.5 
+    
+    margin = 0.1 
+    sharp_loss = F.relu(margin - grad_high_mag.mean(dim=1, keepdim=True)).mean() 
+    
+    total_loss = (ortho_weight * ortho_loss + 
+                  smooth_weight * smooth_loss + 
+                  sharp_weight * sharp_loss) 
+    
+    return total_loss
+
+
+def generate_edge_pseudo_label(image: torch.Tensor) -> torch.Tensor:
+    """
+    使用 Sobel 算子生成边缘伪标签（仅用于热启动阶段）
+    
+    Args:
+        image: 输入图像 [B, 3, H, W]
+    
+    Returns:
+        edge_label: 边缘伪标签 [B, 1, H/4, W/4]，值域 [0, 1]
+    """
+    gray_weights = torch.tensor([0.2989, 0.5870, 0.1140],
+                                 device=image.device, dtype=image.dtype).view(1, 3, 1, 1)
+    gray = (image * gray_weights).sum(dim=1, keepdim=True)
+    
+    sobel_x = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]],
+                           device=image.device, dtype=image.dtype).view(1, 1, 3, 3)
+    sobel_y = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]],
+                           device=image.device, dtype=image.dtype).view(1, 1, 3, 3)
+    
+    grad_x = F.conv2d(gray, sobel_x, padding=1)
+    grad_y = F.conv2d(gray, sobel_y, padding=1)
+    
+    grad_mag = torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-6)
+    
+    threshold = grad_mag.mean() + grad_mag.std()
+    edge_label = (grad_mag > threshold).float()
+    
+    edge_label = F.interpolate(edge_label, scale_factor=0.25, mode='nearest')
+    
+    return edge_label
+
+
+def edge_warmup_loss(image1: torch.Tensor, edge_pred: torch.Tensor, 
+                     warmup_epochs: int = 5, current_epoch: int = 0) -> torch.Tensor: 
+    """ 
+    EdgeNet BCE 热启动辅助损失 
+    """ 
+    if current_epoch >= warmup_epochs: 
+        return torch.tensor(0.0, device=image1.device, dtype=image1.dtype) 
+    
+    with torch.no_grad(): 
+        edge_label = generate_edge_pseudo_label(image1) 
+        
+        if edge_pred.shape != edge_label.shape: 
+            edge_label = F.interpolate(edge_label, size=edge_pred.shape[2:], mode='nearest') 
+    
+    bce_loss = F.binary_cross_entropy(edge_pred.float(), edge_label.float(), reduction='mean') 
+    
+    warmup_weight = 1.0 - (current_epoch / warmup_epochs) 
+    
+    return warmup_weight * bce_loss
+
+
+def update_temperature_hook(model, current_epoch: int, total_epochs: int):
+    """
+    在 epoch 循环中调用温度退火
+    
+    Args:
+        model: nn.DataParallel 包装的模型
+        current_epoch: 当前训练轮次
+        total_epochs: 总训练轮次
+    """
+    if hasattr(model, 'module'):
+        guided_volume = model.module.guided_volume
+    else:
+        guided_volume = model.guided_volume
+    
+    if hasattr(guided_volume, 'update_temperature'):
+        guided_volume.update_temperature(
+            current_epoch=current_epoch,
+            total_epochs=total_epochs,
+            start_temp=2.0,
+            end_temp=0.1
+        )
+        current_temp = guided_volume.adaptive_temp.item()
+        logging.info(f"[Temperature Annealing] Epoch {current_epoch}: temp = {current_temp:.4f}")
+    else:
+        logging.warning("guided_volume has no update_temperature method")
 
 
 def fetch_optimizer(args, model):
@@ -188,6 +311,11 @@ def train(args):
 
     best_epe = float('inf')
     should_keep_training = True
+    
+    steps_per_epoch = len(train_loader)
+    total_epochs = args.num_steps // steps_per_epoch
+    epoch_counter = 0
+    warmup_epochs = 5
 
     while should_keep_training:
         for i_batch, (_, *data_blob) in enumerate(tqdm(train_loader)):
@@ -195,21 +323,59 @@ def train(args):
             image1, image2, disp_gt, valid = [x.cuda() for x in data_blob]
 
             assert model.training
-            agg_preds, iter_preds = model(image1, image2, iters=args.train_iters)
+            
+            outputs = model(image1, image2, iters=args.train_iters)
+            
+            if len(outputs) == 3:
+                agg_preds, iter_preds, aux_outputs = outputs
+                edge_pred, f_low, f_high = aux_outputs
+            else:
+                agg_preds, iter_preds = outputs
+                edge_pred, f_low, f_high = None, None, None
+            
             assert model.training
 
             loss, metrics = sequence_loss(args, agg_preds, iter_preds, disp_gt, valid)
+            
+            if f_low is not None and f_high is not None:
+                freq_loss = frequency_orthogonal_loss(f_low, f_high,
+                                                       ortho_weight=0.1,
+                                                       smooth_weight=0.05,
+                                                       sharp_weight=0.05)
+                loss = loss + 0.01 * freq_loss
+                logger.writer.add_scalar("freq_orthogonal_loss", freq_loss.item(), global_batch_num)
+            
+            if edge_pred is not None:
+                e_loss = edge_warmup_loss(image1, edge_pred, warmup_epochs, epoch_counter)
+                if e_loss.item() > 0:
+                    loss = loss + 0.1 * e_loss
+                    logger.writer.add_scalar("edge_warmup_loss", e_loss.item(), global_batch_num)
+            
             logger.writer.add_scalar("live_loss", loss.item(), global_batch_num)
             logger.writer.add_scalar(f'learning_rate', optimizer.param_groups[0]['lr'], global_batch_num)
             global_batch_num += 1
 
             # ==========================================================
-            # 🛡️ 终极防御装甲：必须补上这块！拦截 FP16 溢出导致的 NaN/Inf Loss
+            # 🛡️ 终极防御装甲：拦截 FP16 溢出导致的 NaN/Inf Loss
             # ==========================================================
             if torch.isnan(loss) or torch.isinf(loss):
                 logging.warning(f"🚨 [Step {total_steps}] 检测到 NaN/Inf Loss (FP16 溢出)！已拦截，保护模型权重，跳过此 Batch。")
                 optimizer.zero_grad() # 清空这个剧毒的梯度
-                continue              # 直接跳出当前 batch，救模型一命！
+                
+                # [新增防御] 必须手动切断引用，否则废弃的计算图会导致下一个 Batch 显存翻倍直接 OOM
+                del outputs, loss
+                if 'agg_preds' in locals(): del agg_preds
+                if 'iter_preds' in locals(): del iter_preds
+                if 'freq_loss' in locals(): del freq_loss
+                if 'e_loss' in locals(): del e_loss
+                if 'f_low' in locals(): del f_low, f_high
+                
+                # 强制清理 CUDA 缓存碎片，将空间还给显卡
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                
+                continue              # 安全跳过
             # ==========================================================
 
             scaler.scale(loss).backward()
@@ -238,7 +404,8 @@ def train(args):
                 
                 results = {}
                 if 'dfc2019' in args.train_datasets:
-                    val_dataset = datasets.DFC2019({}, split='val')
+                    target_region = getattr(args, 'dfc_region', 'all')
+                    val_dataset = datasets.DFC2019({}, split='val', region=target_region)
                     val_loader = data.DataLoader(val_dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=4)
                     
                     dfc_results = evaluate_dataset(model.module, val_loader, iters=args.valid_iters, mixed_prec=args.mixed_precision)
@@ -247,7 +414,8 @@ def train(args):
                         
                 elif 'whu' in args.train_datasets:
                     # 1. 验证同分布 (In-Domain)
-                    in_domain_dataset = datasets.WHUStereo({}, split='validation')
+                    target_region = getattr(args, 'whu_region', 'all')
+                    in_domain_dataset = datasets.WHUStereo({}, split='validation', region=target_region)
                     in_domain_loader = data.DataLoader(in_domain_dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=4)
                     
                     in_domain_results = evaluate_dataset(model.module, in_domain_loader, iters=args.valid_iters, mixed_prec=args.mixed_precision)
@@ -255,7 +423,8 @@ def train(args):
                         results[f'InDomain/{key}'] = value
 
                     # 2. 验证跨城泛化 (Zero-Shot)
-                    zero_shot_dataset = datasets.WHUStereo({}, split='test')
+                    target_region = getattr(args, 'whu_region', 'all')
+                    zero_shot_dataset = datasets.WHUStereo({}, split='test', region=target_region)
                     zero_shot_loader = data.DataLoader(zero_shot_dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=4)
                     
                     zero_shot_results = evaluate_dataset(model.module, zero_shot_loader, iters=args.valid_iters, mixed_prec=args.mixed_precision)
@@ -299,6 +468,11 @@ def train(args):
                 logging.info(f"\n{'=' * 60}\n>>> STATUS: Validation Finished -> RESUME Training\n{'=' * 60}")
 
             total_steps += 1
+            
+            if total_steps % steps_per_epoch == 0:
+                epoch_counter += 1
+                if getattr(args, 'model_arch', 'ours') == 'ours':
+                    update_temperature_hook(model, epoch_counter, total_epochs)
 
             if total_steps > args.num_steps:
                 should_keep_training = False
@@ -368,6 +542,8 @@ if __name__ == '__main__':
     parser.add_argument('--noyjitter', action='store_true', help='don\'t simulate imperfect rectification')
     
     parser.add_argument('--model_arch', default='ours', choices=['baseline', 'ours'], help='Choose model architecture')
+    
+    parser.add_argument('--dfc_region', default='all', choices=['jax', 'oma', 'all'], help='Choose specific region for DFC2019 dataset (jax/oma/all)')
 
     args = parser.parse_args()
     

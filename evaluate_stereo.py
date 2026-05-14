@@ -42,99 +42,110 @@ def compute_physical_edge_metrics(flow_pr, flow_gt, image1, valid_gt, sobel_x, s
         valid_gt = valid_gt.unsqueeze(1)
 
     gray = 0.299 * image1[:, 0:1, :, :] + 0.587 * image1[:, 1:2, :, :] + 0.114 * image1[:, 2:3, :, :]
-    grad_x = F.conv2d(gray, sobel_x, padding=1)
-    grad_y = F.conv2d(gray, sobel_y, padding=1)
-    gradient_magnitude = torch.sqrt(grad_x ** 2 + grad_y ** 2)
-
-    edge_mask = (gradient_magnitude > edge_threshold)
-    smooth_mask = ~edge_mask
-
-    diff = (flow_pr - flow_gt).abs()
-
-    global_epe = (diff * valid_gt).sum() / (valid_gt.sum() + 1e-6)
-
-    edge_valid = (valid_gt > 0.5) & edge_mask
-    edge_epe = (diff * edge_valid.float()).sum() / (edge_valid.sum() + 1e-6)
-
-    smooth_valid = (valid_gt > 0.5) & smooth_mask
-    smooth_epe = (diff * smooth_valid.float()).sum() / (smooth_valid.sum() + 1e-6)
-
-    outlier_1px = ((diff > 1.0) & (valid_gt > 0.5)).float().sum() / (valid_gt.sum() + 1e-6)
-    outlier_3px = ((diff > 3.0) & (valid_gt > 0.5)).float().sum() / (valid_gt.sum() + 1e-6)
-
-    return {
-        'global_epe': global_epe.item(),
-        'edge_epe': edge_epe.item(),
-        'smooth_epe': smooth_epe.item(),
-        '1px_error': outlier_1px.item(),
-        '3px_error': outlier_3px.item()
-    }
+    edge_x = F.conv2d(gray, sobel_x, padding=1)
+    edge_y = F.conv2d(gray, sobel_y, padding=1)
+    edge_mag = torch.sqrt(edge_x**2 + edge_y**2)
+    
+    edge_mask = (edge_mag > edge_threshold).float()
+    edge_valid = edge_mask * valid_gt
+    
+    smooth_mask = (edge_mag <= edge_threshold).float()
+    smooth_valid = smooth_mask * valid_gt
+    
+    epe = torch.abs(flow_pr - flow_gt)
+    
+    edge_epe = (epe * edge_valid).sum() / (edge_valid.sum() + 1e-6)
+    smooth_epe = (epe * smooth_valid).sum() / (smooth_valid.sum() + 1e-6)
+    
+    return edge_epe.item(), smooth_epe.item()
 
 
 @torch.no_grad()
-def evaluate_dataset(model, val_loader, iters=32, mixed_prec=False):
+def evaluate_dataset(model, loader, iters, mixed_prec):
     model.eval()
-
+    results = {}
+    
+    all_epe = []
+    all_1px = []
+    all_3px = []
+    all_edge_epe = []
+    all_smooth_epe = []
+    
     sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3).cuda()
-    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3).cuda()
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 1, 2], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3).cuda()
 
-    metrics_accumulator = {k: [] for k in ['global_epe', 'edge_epe', 'smooth_epe', '1px_error', '3px_error']}
+    for i_batch, (_, image1, image2, flow_gt, valid_gt) in enumerate(tqdm(loader)):
+        image1 = image1.cuda()
+        image2 = image2.cuda()
+        flow_gt = flow_gt.cuda()
+        valid_gt = valid_gt.cuda()
 
-    for _, image1, image2, flow_gt, valid_gt in tqdm(val_loader, desc=f"Evaluating", leave=False):
-        image1, image2 = image1.cuda(), image2.cuda()
-        flow_gt, valid_gt = flow_gt.cuda(), valid_gt.cuda()
+        flow_pr = run_inference(model, image1, image2, iters, mixed_prec)
+        
+        if valid_gt.dim() == 3:
+            valid_gt = valid_gt.unsqueeze(1)
 
-        flow_pr = run_inference(model, image1, image2, iters=iters, mixed_prec=mixed_prec)
-        metrics = compute_physical_edge_metrics(flow_pr, flow_gt, image1, valid_gt, sobel_x, sobel_y)
+        epe = torch.abs(flow_pr - flow_gt)
+        val_epe = epe[valid_gt > 0]
+        
+        if val_epe.numel() > 0:
+            all_epe.append(val_epe.mean().item())
+            all_1px.append((val_epe < 1.0).float().mean().item())
+            all_3px.append((val_epe < 3.0).float().mean().item())
+            
+            e_epe, s_epe = compute_physical_edge_metrics(flow_pr, flow_gt, image1, valid_gt, sobel_x, sobel_y)
+            all_edge_epe.append(e_epe)
+            all_smooth_epe.append(s_epe)
 
-        for key in metrics_accumulator:
-            metrics_accumulator[key].append(metrics[key])
+        if i_batch % 50 == 0:
+            gc.collect()
+            torch.cuda.empty_cache()
 
-    results = {key: np.mean(values) for key, values in metrics_accumulator.items()}
+    results['global_epe'] = np.mean(all_epe)
+    results['1px_error'] = 1.0 - np.mean(all_1px)
+    results['3px_error'] = 1.0 - np.mean(all_3px)
+    results['edge_epe'] = np.mean(all_edge_epe)
+    results['smooth_epe'] = np.mean(all_smooth_epe)
+
     return results
 
 
 def build_model(args):
     model = IGEVStereo(args)
-    model = torch.nn.DataParallel(model, device_ids=[0])
     return model
 
 
 def load_checkpoint(model, ckpt_path):
-    checkpoint = torch.load(ckpt_path, map_location='cpu')
-    new_checkpoint = {}
-    for k, v in checkpoint.items():
-        new_key = k.replace('gbc_volume', 'guided_volume')
-        new_checkpoint[new_key] = v
-    model.load_state_dict(new_checkpoint, strict=False)
+    logging.info(f"Loading checkpoint from {ckpt_path}...")
+    state_dict = torch.load(ckpt_path)
+    # 处理 DataParallel 包装
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            new_state_dict[k[7:]] = v
+        else:
+            new_state_dict[k] = v
+    model.load_state_dict(new_state_dict, strict=True)
     return model
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Single Model Leaderboard Evaluation Engine")
-
-    # 1. 明确指向单个 .pth 文件
-    parser.add_argument('--restore_ckpt', type=str, required=True,
-                        help="Path to the specific .pth file you want to evaluate")
-
-    # 2. 架构拨片与数据集
-    parser.add_argument('--model_arch', type=str, required=True, choices=['baseline', 'ours'],
-                        help="Model architecture switch: 'baseline' (IGEV++) or 'ours' (EdgeFreq-Net)")
-    parser.add_argument('--dataset', type=str, required=True, choices=['whu', 'dfc2019'], help="Dataset to evaluate")
-    parser.add_argument('--split', type=str, default='test', choices=['val', 'validation', 'test'],
-                        help="Data split to use")
-
-    # 3. 架构底层参数
-    parser.add_argument('--mixed_precision', action='store_true', default=False)
-    parser.add_argument('--precision_dtype', default='float16', choices=['float16', 'bfloat16', 'float32'],
-                        help='Choose precision type: float16 or bfloat16 or float32')
-    parser.add_argument('--valid_iters', type=int, default=32)
-    parser.add_argument('--hidden_dims', nargs='+', type=int, default=[128, 128, 128])
-    parser.add_argument('--corr_levels', type=int, default=2)
-    parser.add_argument('--corr_radius', type=int, default=4)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', help='dataset name', choices=['sceneflow', 'kitti', 'middlebury', 'eth3d', 'dfc2019', 'whu'])
+    parser.add_argument('--split', help='dataset split', default='test')
+    parser.add_argument('--dfc_region', default='all', choices=['jax', 'oma', 'all'], help='DFC2019 region selection')
+    parser.add_argument('--ckpt', help='checkpoint path')
+    
+    # 架构相关参数
+    parser.add_argument('--max_disp', type=int, default=768)
+    parser.add_argument('--model_arch', default='ours', choices=['baseline', 'ours'])
     parser.add_argument('--n_downsample', type=int, default=2)
     parser.add_argument('--n_gru_layers', type=int, default=2)
-    parser.add_argument('--max_disp', type=int, default=768)
+    parser.add_argument('--hidden_dims', nargs='+', type=int, default=[128] * 3)
+    parser.add_argument('--corr_levels', type=int, default=2)
+    parser.add_argument('--corr_radius', type=int, default=4)
+    
+    # 代价体参数
     parser.add_argument('--s_disp_range', type=int, default=48)
     parser.add_argument('--m_disp_range', type=int, default=96)
     parser.add_argument('--l_disp_range', type=int, default=192)
@@ -142,62 +153,43 @@ if __name__ == '__main__':
     parser.add_argument('--m_disp_interval', type=int, default=2)
     parser.add_argument('--l_disp_interval', type=int, default=4)
 
+    # 运行配置
+    parser.add_argument('--valid_iters', type=int, default=32)
+    parser.add_argument('--mixed_precision', action='store_true')
+    parser.add_argument('--precision_dtype', default='float16')
+
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-    ckpt_path = Path(args.restore_ckpt)
-    if not ckpt_path.is_file() or ckpt_path.suffix != '.pth':
-        raise ValueError(f"The path provided must be a valid .pth file: {ckpt_path}")
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s')
 
-    # 自动生成能识别身份的模型名称：[架构]_文件夹名_权重名
-    model_name = f"[{args.model_arch.upper()}]_{ckpt_path.parent.name}_{ckpt_path.stem}"
-
-    print(f"\n{'=' * 70}")
-    print(f"  Leaderboard Evaluation -> Dataset: {args.dataset.upper()} | Split: {args.split}")
-    print(f"  Model Name: {model_name}")
-    print(f"{'=' * 70}\n")
-
-    # 1. 准备数据集
+    # 1. 准备验证集
     if args.dataset == 'dfc2019':
-        val_dataset = datasets.DFC2019({}, split=args.split)
+        # 传递 region 参数以确保划分一致
+        val_dataset = datasets.DFC2019({}, split=args.split, region=args.dfc_region)
     elif args.dataset == 'whu':
         val_dataset = datasets.WHUStereo({}, split=args.split)
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+        
     val_loader = data.DataLoader(val_dataset, batch_size=1, pin_memory=True, shuffle=False, num_workers=4)
 
     # 2. 准备模型
     model = build_model(args)
     model.cuda()
-    model = load_checkpoint(model, ckpt_path)
+    model = load_checkpoint(model, args.ckpt)
 
     # 3. 开始评估
     results = evaluate_dataset(model, val_loader, args.valid_iters, args.mixed_precision)
 
-    print(
-        f"\n     [Result] G-EPE: {results['global_epe']:.3f} | Edge: {results['edge_epe']:.3f} | Smooth: {results['smooth_epe']:.3f} | 1px: {results['1px_error']:.3f} | 3px: {results['3px_error']:.3f}")
+    print(f"\n     [Result] Dataset: {args.dataset} | Region: {args.dfc_region} | Split: {args.split}")
+    print(f"     G-EPE: {results['global_epe']:.3f} | Edge: {results['edge_epe']:.3f} | Smooth: {results['smooth_epe']:.3f} | 1px: {results['1px_error']:.3f} | 3px: {results['3px_error']:.3f}")
 
-    # ==========================================
-    # 4. 原地追加 CSV 汇总表逻辑
-    # ==========================================
-    csv_filename = f"summary_{args.dataset}_{args.split}.csv"
+    # 4. 汇总 CSV
+    csv_filename = f"summary_{args.dataset}_{args.dfc_region}_{args.split}.csv"
     csv_path = Path(csv_filename)
-
     file_exists = csv_path.exists()
 
-    # 使用 'a' 模式（append），如果文件存在则追加，不存在则创建
     with open(csv_path, 'a', encoding='utf-8') as f:
-        # 如果是新创建的文件，先写入表头
         if not file_exists:
             f.write("Model_Name,Global_EPE,Edge_EPE,Smooth_EPE,1px_Error,3px_Error\n")
-
-        # 写入本次模型的数据
-        f.write(
-            f"{model_name},{results['global_epe']:.4f},{results['edge_epe']:.4f},{results['smooth_epe']:.4f},{results['1px_error']:.4f},{results['3px_error']:.4f}\n")
-
-    print(f"\n{'=' * 70}")
-    print(f" Evaluation Completed!")
-    print(f" Result appended to: -> {csv_path.absolute()} <-")
-    print(f"{'=' * 70}\n")
-
-    # 清理缓存
-    gc.collect()
-    torch.cuda.empty_cache()
+        f.write(f"{args.ckpt},{results['global_epe']:.4f},{results['edge_epe']:.4f},{results['smooth_epe']:.4f},{results['1px_error']:.4f},{results['3px_error']:.4f}\n")

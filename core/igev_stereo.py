@@ -7,7 +7,7 @@ from core.geometry import Combined_Geo_Encoding_Volume
 from core.submodule import *
 import time
 
-from core.guided_cost_volume import EdgeGuidance, FrequencyDecoupler, AdaptiveScaleVolume
+from core.guided_cost_volume import LearnableEdgeGuidance, FrequencyDecoupler, AdaptiveScaleVolume
 from core.submodule import build_gwc_volume
 
 try:
@@ -111,14 +111,9 @@ class IGEVStereo(nn.Module):
         self.context_zqr_convs = nn.ModuleList([nn.Conv2d(context_dims[i], args.hidden_dims[i]*3, 3, padding=3//2) for i in range(self.args.n_gru_layers)])
         self.feature = Feature()
         
-        edge_scale = getattr(args, 'edge_scale', 10.0)
-        edge_offset = getattr(args, 'edge_offset', 0.15)
-        self.edge_guidance = EdgeGuidance(
-            downsample_factor=4, 
-            blur_kernel_size=9, 
-            sigma=3.0,
-            scale=edge_scale,
-            offset=edge_offset
+        self.edge_guidance = LearnableEdgeGuidance(
+            in_channels=3,
+            hidden_channels=16
         )
         self.frequency_decoupler = FrequencyDecoupler(kernel_size=5)
 
@@ -232,20 +227,9 @@ class IGEVStereo(nn.Module):
             stem_4y = self.stem_4(stem_2y)
             
             if getattr(self.args, 'model_arch', 'ours') == 'ours':
-                # 【Ours 路径】
                 mask_left = self.edge_guidance(image1)
-                mask_right = self.edge_guidance(image2) 
-                
-                f_low_l, f_high_l = self.frequency_decoupler(features_left[0])
-                f_low_r, f_high_r = self.frequency_decoupler(features_right[0])
-                
-                f_high_l_modulated = f_high_l.mul_(1.0 + mask_left)
-                f_high_r_modulated = f_high_r.mul_(1.0 + mask_right)
-                
-                features_left[0] = f_low_l.add_(f_high_l_modulated)
-                features_right[0] = f_low_r.add_(f_high_r_modulated)
-                
-                # 防御性对齐
+                mask_right = self.edge_guidance(image2)
+
                 if features_left[0].shape[2:] != stem_4x.shape[2:]:
                     stem_4x = F.interpolate(stem_4x, size=features_left[0].shape[2:], mode='bilinear', align_corners=False)
                     stem_4y = F.interpolate(stem_4y, size=features_right[0].shape[2:], mode='bilinear', align_corners=False)
@@ -253,14 +237,32 @@ class IGEVStereo(nn.Module):
                 features_left[0] = torch.cat((features_left[0], stem_4x), 1)
                 features_right[0] = torch.cat((features_right[0], stem_4y), 1)
 
-                match_left = self.desc(self.conv(features_left[0]))
-                match_right = self.desc(self.conv(features_right[0])) 
+                match_l_full = self.desc(self.conv(features_left[0]))
+                match_r_full = self.desc(self.conv(features_right[0]))
+
+                match_low_l, match_high_l = self.frequency_decoupler(match_l_full)
+                match_low_r, match_high_r = self.frequency_decoupler(match_r_full)
+
+                half_ch = match_l_full.shape[1] // 2
+
+                feat_low_l = match_low_l[:, :half_ch, :, :]
+                feat_low_r = match_low_r[:, :half_ch, :, :]
+
+                feat_high_l = match_high_l[:, half_ch:, :, :]
+                feat_high_r = match_high_r[:, half_ch:, :, :]
+
+                feat_high_l = feat_high_l * (1.0 + mask_left)
+                feat_high_r = feat_high_r * (1.0 + mask_right)
+
+                all_disp_volume = self.guided_volume(
+                    feat_low_l, feat_low_r,
+                    feat_high_l, feat_high_r,
+                    match_l_full, mask_left
+                )
                 
-                all_disp_volume = self.guided_volume(match_left, match_right, mask_left)
+                aux_outputs = (mask_left, feat_low_l, feat_high_l)
 
             else:
-                # 【Baseline 路径】
-                # 同样加上防御性对齐，防止 Baseline 训练时 batch 形状崩塌
                 if features_left[0].shape[2:] != stem_4x.shape[2:]:
                     stem_4x = F.interpolate(stem_4x, size=features_left[0].shape[2:], mode='bilinear', align_corners=False)
                     stem_4y = F.interpolate(stem_4y, size=features_right[0].shape[2:], mode='bilinear', align_corners=False)
@@ -268,10 +270,12 @@ class IGEVStereo(nn.Module):
                 features_left[0] = torch.cat((features_left[0], stem_4x), 1)
                 features_right[0] = torch.cat((features_right[0], stem_4y), 1)
 
-                match_left = self.desc(self.conv(features_left[0]))
-                match_right = self.desc(self.conv(features_right[0])) 
+                match_l_full = self.desc(self.conv(features_left[0]))
+                match_r_full = self.desc(self.conv(features_right[0])) 
                 
-                all_disp_volume = build_gwc_volume(match_left, match_right, self.args.max_disp//4, 8)
+                all_disp_volume = build_gwc_volume(match_l_full, match_r_full, self.args.max_disp//4, 8)
+                
+                aux_outputs = None
 
             disp_volume0 = all_disp_volume[:,:,:self.args.s_disp_range]
             disp_volume1 = self.patch0(all_disp_volume[:,:,:self.args.m_disp_range])
@@ -301,9 +305,9 @@ class IGEVStereo(nn.Module):
             inp_list = [list(conv(i).split(split_size=conv.out_channels//3, dim=1)) for i,conv in zip(inp_list, self.context_zqr_convs)]
 
         geo_block = Combined_Geo_Encoding_Volume
-        geo_fn = geo_block(geo_encoding_volume0.float(), geo_encoding_volume1.float(), geo_encoding_volume2.float(), match_left.float(), match_right.float(), radius=self.args.corr_radius)
-        b, c, h, w = match_left.shape
-        coords = torch.arange(w).float().to(match_left.device).reshape(1,1,w,1).repeat(b, h, 1, 1)
+        geo_fn = geo_block(geo_encoding_volume0.float(), geo_encoding_volume1.float(), geo_encoding_volume2.float(), match_l_full.float(), match_r_full.float(), radius=self.args.corr_radius)
+        b, c, h, w = match_l_full.shape
+        coords = torch.arange(w).float().to(match_l_full.device).reshape(1,1,w,1).repeat(b, h, 1, 1)
         disp = agg_disp0
         iter_preds = []
 
@@ -331,4 +335,8 @@ class IGEVStereo(nn.Module):
         agg_disp0 = context_upsample(agg_disp0*4., spx_pred.float())
         agg_disp1 = context_upsample(agg_disp1*4., spx_pred.float())
         agg_disp2 = context_upsample(agg_disp2*4., spx_pred.float())
-        return [agg_disp0, agg_disp1, agg_disp2], iter_preds
+        
+        if self.training and aux_outputs is not None:
+            return [agg_disp0, agg_disp1, agg_disp2], iter_preds, aux_outputs
+        else:
+            return [agg_disp0, agg_disp1, agg_disp2], iter_preds

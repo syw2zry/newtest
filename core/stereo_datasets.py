@@ -115,16 +115,24 @@ class StereoDataset(data.Dataset):
 
 
 class DFC2019(StereoDataset):
-    def __init__(self, aug_params=None, root='/home/roy/projects/YAOWEI/data/dfc2019-big', split='train'):
+    def __init__(self, aug_params=None, root='/home/roy/projects/YAOWEI/data/dfc2019-big', split='train', region='all'):
         super(DFC2019, self).__init__(aug_params, sparse=True)
         self.root = root
         self.split = split
+        self.region = region.upper()
 
         self.left_dir = os.path.join(root, 'left')
         self.right_dir = os.path.join(root, 'right')
         self.disp_dir = os.path.join(root, 'disp')
 
-        left_images = sorted(glob(osp.join(self.left_dir, '*_LEFT_RGB.tif')))
+        all_left_images = sorted(glob(osp.join(self.left_dir, '*_LEFT_RGB.tif')))
+
+        if self.region == 'JAX':
+            left_images = [f for f in all_left_images if 'JAX' in osp.basename(f)]
+        elif self.region == 'OMA':
+            left_images = [f for f in all_left_images if 'OMA' in osp.basename(f)]
+        else:
+            left_images = all_left_images
 
         state = np.random.get_state()
         np.random.seed(1000)
@@ -132,8 +140,16 @@ class DFC2019(StereoDataset):
         np.random.set_state(state)
 
         num_images = len(left_images)
-        train_end = int(0.8 * num_images)
-        val_end = int(0.9 * num_images)
+
+        if self.region == 'JAX':
+            train_end = 1600
+            val_end = 1600 + 139
+        elif self.region == 'OMA':
+            train_end = 1600
+            val_end = 1600 + 153
+        else:
+            train_end = int(0.8 * num_images)
+            val_end = int(0.9 * num_images)
 
         if split == 'train':
             split_indices = indices[:train_end]
@@ -151,11 +167,12 @@ class DFC2019(StereoDataset):
             fname_right = fname.replace('LEFT', 'RIGHT')
             r_path = osp.join(self.right_dir, fname_right)
             d_path = osp.join(self.disp_dir, fname.replace('RGB', 'DSP'))
+            
+            if os.path.exists(l_path) and os.path.exists(r_path) and os.path.exists(d_path):
+                self.image_list.append([l_path, r_path])
+                self.disparity_list.append(d_path)
 
-            self.image_list.append([l_path, r_path])
-            self.disparity_list.append(d_path)
-
-        logging.info(f"DFC2019 {split} set: {len(self.image_list)} pairs loaded.")
+        logging.info(f"DFC2019 (Region: {self.region}) {split} set: {len(self.image_list)} pairs loaded. Total in region: {num_images}")
 
     def __getitem__(self, index):
         index = index % len(self.image_list)
@@ -332,8 +349,9 @@ def fetch_dataloader(args):
     train_dataset = None
     
     if args.train_datasets == 'dfc2019':
-        new_dataset = DFC2019(aug_params, root='/home/roy/projects/YAOWEI/data/dfc2019-big', split='train')
-        logging.info(f"Adding {len(new_dataset)} samples from DFC2019")
+        target_region = getattr(args, 'dfc_region', 'all')
+        new_dataset = DFC2019(aug_params, root='/home/roy/projects/YAOWEI/data/dfc2019-big', split='train', region=target_region)
+        logging.info(f"Adding {len(new_dataset)} samples from DFC2019 (Region setting: {target_region})")
     elif 'whu' in args.train_datasets:
         aug_params = {'crop_size': args.image_size, 'min_scale': args.spatial_scale[0],
                       'max_scale': args.spatial_scale[1], 'do_flip': False, 'yjitter': not args.noyjitter}
